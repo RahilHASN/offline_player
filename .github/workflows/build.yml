@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Generate Android project files
+        run: flutter create --platforms=android --project-name offline_player --org com.example.offlineplayer .
+
+      - name: Remove internet permission and set app name
+        run: |
+          find android -name AndroidManifest.xml -exec sed -i '/android.permission.INTERNET/d' {} +
+          sed -i 's/android:label="[^"]*"/android:label="Offline Player"/' android/app/src/main/AndroidManifest.xml
+          if grep -rq "android.permission.INTERNET" android --include=AndroidManifest.xml; then
+            echo "INTERNET permission still present"; exit 1
+          fi
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-player-android
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Generate Windows project files
+        run: flutter create --platforms=windows --project-name offline_player --org com.example.offlineplayer .
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build Windows
+        run: flutter build windows --release
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-player-windows
+          path: build/windows/x64/runner/Release
