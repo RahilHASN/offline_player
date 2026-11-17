@@ -1,5 +1,4 @@
-
-import 'package:flutter/material.dart';
+}import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import '../models/video_item.dart';
@@ -13,57 +12,140 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> {
+class _LibraryScreenState extends State<LibraryScreen>
+    with WidgetsBindingObserver {
   final LibraryController _c = LibraryController();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _c.init();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _c.dispose();
     super.dispose();
   }
 
-  void _showFolders() {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _c.onResumed();
+    }
+  }
+
+  void _showSources() {
     showDialog<void>(
       context: context,
       builder: (ctx) => ListenableBuilder(
         listenable: _c,
-        builder: (ctx, _) => AlertDialog(
-          title: const Text('Folders'),
-          content: SizedBox(
-            width: 420,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_c.folders.isEmpty) const Text('No folders yet.'),
-                for (final f in _c.folders)
-                  ListTile(
-                    dense: true,
-                    title: Text(f, overflow: TextOverflow.ellipsis),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.close),
-                      onPressed: () => _c.removeFolder(f),
-                    ),
-                  ),
-              ],
+        builder: (ctx, _) {
+          final titleStyle = Theme.of(ctx).textTheme.titleSmall;
+          return AlertDialog(
+            title: const Text('Sources'),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_c.isAndroid && !_c.allFilesAccess) ...[
+                      const Text(
+                        'To read pendrives and extra folders, allow '
+                        '"All files access" for this app. A settings page '
+                        'will open: switch it on, then come back.',
+                      ),
+                      const SizedBox(height: 8),
+                      FilledButton(
+                        onPressed: _c.requestAllFilesAccess,
+                        child: const Text('Allow all files access'),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    if (_c.canScanFiles) ...[
+                      Text('Detected drives', style: titleStyle),
+                      if (_c.drives.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          child: Text(
+                            _c.isAndroid
+                                ? 'No pendrive detected. Plug it in, then tap Rescan. '
+                                    'If it still does not show, use "Add folder".'
+                                : 'No drives found.',
+                            style: const TextStyle(color: Colors.white54),
+                          ),
+                        ),
+                      for (final d in _c.drives)
+                        ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(
+                              d.removable ? Icons.usb : Icons.storage),
+                          title: Text(d.root),
+                          subtitle:
+                              Text(d.removable ? 'Removable' : 'Fixed drive'),
+                          trailing: _c.isAndroid
+                              ? const Text('Auto-scanned',
+                                  style: TextStyle(fontSize: 12))
+                              : (_c.folders.contains(d.root)
+                                  ? const Icon(Icons.check)
+                                  : TextButton(
+                                      onPressed: () => _c.addPath(d.root),
+                                      child: const Text('Add'),
+                                    )),
+                        ),
+                      const SizedBox(height: 12),
+                      Text('Folders', style: titleStyle),
+                      if (_c.folders.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Text('No folders added.',
+                              style: TextStyle(color: Colors.white54)),
+                        ),
+                      for (final f in _c.folders)
+                        ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(f, overflow: TextOverflow.ellipsis),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: () => _c.removeFolder(f),
+                          ),
+                        ),
+                    ],
+                    if (_c.notice != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          _c.notice!,
+                          style: const TextStyle(color: Colors.orangeAccent),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: _c.addFolder,
-              child: const Text('Add folder'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
+            actions: [
+              if (_c.canScanFiles)
+                TextButton(
+                  onPressed: _c.addFolder,
+                  child: const Text('Add folder'),
+                ),
+              TextButton(
+                onPressed: _c.loading ? null : _c.refresh,
+                child: const Text('Rescan'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Close'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -77,12 +159,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
           appBar: AppBar(
             title: Text('Library (${_c.items.length})'),
             actions: [
-              if (_c.isWindows)
-                IconButton(
-                  tooltip: 'Folders',
-                  icon: const Icon(Icons.folder_open),
-                  onPressed: _showFolders,
-                ),
+              IconButton(
+                tooltip: 'Sources',
+                icon: const Icon(Icons.usb),
+                onPressed: _showSources,
+              ),
               IconButton(
                 tooltip: 'Rescan',
                 icon: const Icon(Icons.refresh),
@@ -124,6 +205,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         text: 'Add a folder or drive to build your library.',
         buttonLabel: 'Add folder',
         onPressed: _c.addFolder,
+        secondaryLabel: 'Show drives',
+        onSecondary: _showSources,
       );
     }
     if (_c.items.isEmpty) {
