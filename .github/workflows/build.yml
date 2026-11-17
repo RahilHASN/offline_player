@@ -42,6 +42,54 @@ jobs:
           grep -q 'tools:node="remove"' "$M" || { echo "Manifest edit failed"; exit 1; }
           cat "$M"
 
+      - name: Force compileSdk 36 for all plugins
+        run: |
+          if [ -f android/build.gradle.kts ]; then
+            cat >> android/build.gradle.kts <<'EOF'
+
+          fun forceCompileSdk(ext: Any) {
+              val attempts = listOf(
+                  "setCompileSdk" to java.lang.Integer::class.java,
+                  "setCompileSdkVersion" to Int::class.javaPrimitiveType!!
+              )
+              for ((name, type) in attempts) {
+                  try {
+                      ext.javaClass.getMethod(name, type).invoke(ext, 36)
+                      return
+                  } catch (_: Exception) {
+                  }
+              }
+          }
+
+          subprojects {
+              if (!state.executed) {
+                  afterEvaluate {
+                      val ext = extensions.findByName("android")
+                      if (ext != null) forceCompileSdk(ext)
+                  }
+              }
+          }
+          EOF
+            echo "Patched build.gradle.kts"
+            tail -n 30 android/build.gradle.kts
+          elif [ -f android/build.gradle ]; then
+            cat >> android/build.gradle <<'EOF'
+
+          subprojects {
+              if (!project.state.executed) {
+                  afterEvaluate { p ->
+                      if (p.hasProperty('android')) {
+                          p.android.compileSdkVersion 36
+                      }
+                  }
+              }
+          }
+          EOF
+            echo "Patched build.gradle"
+          else
+            echo "No root gradle file found"; exit 1
+          fi
+
       - name: Get packages
         run: flutter pub get
 
