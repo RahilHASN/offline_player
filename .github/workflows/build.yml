@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   android:
     runs-on: ubuntu-latest
@@ -27,19 +31,28 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name offline_player --org com.example.offlineplayer .
 
-      - name: Remove internet permission and set app name
+      - name: Prepare Android manifest
         run: |
+          M=android/app/src/main/AndroidManifest.xml
           find android -name AndroidManifest.xml -exec sed -i '/android.permission.INTERNET/d' {} +
-          sed -i 's/android:label="[^"]*"/android:label="Offline Player"/' android/app/src/main/AndroidManifest.xml
-          if grep -rq "android.permission.INTERNET" android --include=AndroidManifest.xml; then
-            echo "INTERNET permission still present"; exit 1
-          fi
+          sed -i 's/android:label="[^"]*"/android:label="Offline Player"/' "$M"
+          sed -i 's#<manifest#<manifest xmlns:tools="http://schemas.android.com/tools" #' "$M"
+          sed -i 's#<application#<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />\n    <application#' "$M"
+          grep -q "READ_MEDIA_VIDEO" "$M" || { echo "Manifest edit failed"; exit 1; }
+          grep -q 'tools:node="remove"' "$M" || { echo "Manifest edit failed"; exit 1; }
+          cat "$M"
 
       - name: Get packages
         run: flutter pub get
 
       - name: Build APK
         run: flutter build apk --release
+
+      - name: Verify final APK has no internet permission
+        run: |
+          AAPT2=$(ls $ANDROID_HOME/build-tools/*/aapt2 | sort -V | tail -n 1)
+          "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk | tee perms.txt
+          if grep -q "android.permission.INTERNET" perms.txt; then echo "INTERNET permission found in APK"; exit 1; fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
