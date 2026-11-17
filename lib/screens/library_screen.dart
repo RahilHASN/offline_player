@@ -1,1 +1,287 @@
 
+import 'package:flutter/material.dart';
+import 'package:photo_manager/photo_manager.dart';
+
+import '../models/video_item.dart';
+import '../services/library_controller.dart';
+import '../utils/format.dart';
+
+class LibraryScreen extends StatefulWidget {
+  const LibraryScreen({super.key});
+
+  @override
+  State<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+class _LibraryScreenState extends State<LibraryScreen> {
+  final LibraryController _c = LibraryController();
+
+  @override
+  void initState() {
+    super.initState();
+    _c.init();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  void _showFolders() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: _c,
+        builder: (ctx, _) => AlertDialog(
+          title: const Text('Folders'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_c.folders.isEmpty) const Text('No folders yet.'),
+                for (final f in _c.folders)
+                  ListTile(
+                    dense: true,
+                    title: Text(f, overflow: TextOverflow.ellipsis),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => _c.removeFolder(f),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: _c.addFolder,
+              child: const Text('Add folder'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: _c,
+      builder: (context, _) {
+        return Scaffold(
+          appBar: AppBar(
+            title: Text('Library (${_c.items.length})'),
+            actions: [
+              if (_c.isWindows)
+                IconButton(
+                  tooltip: 'Folders',
+                  icon: const Icon(Icons.folder_open),
+                  onPressed: _showFolders,
+                ),
+              IconButton(
+                tooltip: 'Rescan',
+                icon: const Icon(Icons.refresh),
+                onPressed: _c.loading ? null : _c.refresh,
+              ),
+            ],
+          ),
+          body: _body(),
+        );
+      },
+    );
+  }
+
+  Widget _body() {
+    if (_c.loading && _c.items.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_c.error != null) {
+      return _Message(
+        icon: Icons.error_outline,
+        text: 'Something went wrong:\n${_c.error}',
+        buttonLabel: 'Try again',
+        onPressed: _c.refresh,
+      );
+    }
+    if (_c.permissionDenied) {
+      return _Message(
+        icon: Icons.lock_outline,
+        text: 'Allow video access so the app can list your videos.',
+        buttonLabel: 'Allow access',
+        onPressed: _c.refresh,
+        secondaryLabel: 'Open settings',
+        onSecondary: PhotoManager.openSetting,
+      );
+    }
+    if (_c.isWindows && _c.folders.isEmpty) {
+      return _Message(
+        icon: Icons.folder_open,
+        text: 'Add a folder or drive to build your library.',
+        buttonLabel: 'Add folder',
+        onPressed: _c.addFolder,
+      );
+    }
+    if (_c.items.isEmpty) {
+      return _Message(
+        icon: Icons.video_library_outlined,
+        text: 'No videos found.',
+        buttonLabel: 'Rescan',
+        onPressed: _c.refresh,
+      );
+    }
+    return Column(
+      children: [
+        if (_c.loading) const LinearProgressIndicator(minHeight: 2),
+        if (_c.unresolved > 0)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text(
+              '${_c.unresolved} videos have an unknown file path (will be handled later).',
+              style: const TextStyle(fontSize: 12, color: Colors.orangeAccent),
+            ),
+          ),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.all(8),
+            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: 260,
+              childAspectRatio: 1.0,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+            ),
+            itemCount: _c.items.length,
+            itemBuilder: (context, i) => _VideoCard(item: _c.items[i]),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _VideoCard extends StatelessWidget {
+  final VideoItem item;
+  const _VideoCard({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      margin: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Container(
+                  color: const Color(0xFF1E1E2A),
+                  child: const Icon(
+                    Icons.movie_outlined,
+                    size: 36,
+                    color: Colors.white24,
+                  ),
+                ),
+                Positioned(
+                  left: 6,
+                  top: 6,
+                  child: _Badge(text: item.source.label),
+                ),
+                Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: _Badge(text: formatDuration(item.duration)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const Spacer(),
+                  Text(
+                    formatSize(item.sizeBytes),
+                    style: const TextStyle(fontSize: 12, color: Colors.white54),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Badge extends StatelessWidget {
+  final String text;
+  const _Badge({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(text, style: const TextStyle(fontSize: 11)),
+    );
+  }
+}
+
+class _Message extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final String buttonLabel;
+  final VoidCallback onPressed;
+  final String? secondaryLabel;
+  final VoidCallback? onSecondary;
+
+  const _Message({
+    required this.icon,
+    required this.text,
+    required this.buttonLabel,
+    required this.onPressed,
+    this.secondaryLabel,
+    this.onSecondary,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 64, color: Colors.white38),
+            const SizedBox(height: 16),
+            Text(text, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            FilledButton(onPressed: onPressed, child: Text(buttonLabel)),
+            if (secondaryLabel != null) ...[
+              const SizedBox(height: 8),
+              TextButton(onPressed: onSecondary, child: Text(secondaryLabel!)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
