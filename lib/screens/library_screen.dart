@@ -1,7 +1,10 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:photo_manager/photo_manager.dart';
 
@@ -28,21 +31,40 @@ class _LibraryScreenState extends State<LibraryScreen>
     with WidgetsBindingObserver {
   final LibraryController _c = LibraryController();
   final TextEditingController _search = TextEditingController();
+  final ScrollController _scroll = ScrollController();
+
   bool _searching = false;
   String? _dir; // current folder in Folders view (null = top)
   Set<String> _rootKeys = <String>{};
+
+  String _source = 'all'; // all, phone, pendrive, pc
+  bool _headerVisible = true;
+
+  bool _selecting = false;
+  final Set<String> _sel = <String>{};
+
+  List<VideoItem>? _lastItems;
+  Timer? _sortTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _c.onDriveAdded = _onDriveAdded;
+    _c.addListener(_onLibChanged);
+    ThumbnailService.instance.version.addListener(_onThumbVersion);
     _c.init();
+    _c.startWatching();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    ThumbnailService.instance.version.removeListener(_onThumbVersion);
+    _c.removeListener(_onLibChanged);
+    _sortTimer?.cancel();
     _search.dispose();
+    _scroll.dispose();
     _c.dispose();
     super.dispose();
   }
@@ -51,14 +73,103 @@ class _LibraryScreenState extends State<LibraryScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _c.onResumed();
+      _c.startWatching();
     } else if (state == AppLifecycleState.paused) {
       PreviewController.instance.stop();
+      _c.stopWatching();
     }
   }
 
   void _snack(String m) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  // ---------- background work ----------
+
+  void _onLibChanged() {
+    if (!mounted || _c.loading) return;
+    if (!identical(_c.items, _lastItems)) {
+      _lastItems = _c.items;
+      ThumbnailService.instance.prefetch(_c.items);
+    }
+    if (_source == 'pendrive') {
+      final has = _c.drives.any((d) => d.removable) ||
+          _c.items.any((v) => v.source == VideoSource.pendrive);
+      if (!has) setState(() => _source = 'all');
+    }
+  }
+
+  /// When sorting by length, re-sort now and then as durations arrive.
+  void _onThumbVersion() {
+    if (AppSettings.instance.sortKey != 'length') return;
+    if (_sortTimer?.isActive ?? false) return;
+    _sortTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _apply(String source, bool folders) {
+    AppSettings.instance.setViewFolders(folders);
+    setState(() {
+      _source = source;
+      _dir = null;
+    });
+  }
+
+  void _onDriveAdded(List<String> roots) {
+    if (!mounted) return;
+    PreviewController.instance.stop();
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.usb),
+              title: const Text('USB drive detected'),
+              subtitle: Text(roots.join('\n')),
+            ),
+            ListTile(
+              leading: const Icon(Icons.usb),
+              title: const Text('All files in USB storage'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _apply('pendrive', false);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.phone_android),
+              title: const Text('All files in Phone storage'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _apply('phone', false);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open),
+              title: const Text('Browse USB folders'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _apply('pendrive', true);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.grid_view),
+              title: const Text('Show everything'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _apply('all', false);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ---------- data ----------
@@ -74,6 +185,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     final tq = _tagQuery.toLowerCase();
 
     final list = _c.items.where((v) {
+      if (_source != 'all' && v.source.name != _source) return false;
       if (tq.isNotEmpty) {
         final tagHit =
             store.tagsFor(v.path).any((t) => t.toLowerCase().contains(tq));
@@ -106,10 +218,54 @@ class _LibraryScreenState extends State<LibraryScreen>
     return list;
   }
 
+  /// The videos shown on screen right now (used by Select all).
+  List<VideoItem> _currentVideos() {
+    final list = _visible();
+    if (!AppSettings.instance.viewFolders || _dir == null) return list;
+    return FolderTree.level(list, _dir, _c.browseRoots, _c.labelFor).videos;
+  }
+
   String? _up(String dir) {
     if (_rootKeys.contains(dir)) return null;
     final p = FolderTree.parentOf(dir);
     return p.isEmpty ? null : p;
+  }
+
+  // ---------- selection ----------
+
+  List<VideoItem> get _selectedItems =>
+      _c.items.where((v) => _sel.contains(v.id)).toList();
+
+  void _toggleSel(VideoItem v) {
+    setState(() {
+      if (!_sel.add(v.id)) _sel.remove(v.id);
+    });
+  }
+
+  void _startSelect([VideoItem? first]) {
+    PreviewController.instance.stop();
+    setState(() {
+      _selecting = true;
+      if (first != null) _sel.add(first.id);
+    });
+  }
+
+  void _endSelect() {
+    setState(() {
+      _selecting = false;
+      _sel.clear();
+    });
+  }
+
+  void _selectAll() {
+    final ids = _currentVideos().map((v) => v.id).toSet();
+    setState(() {
+      if (ids.isNotEmpty && _sel.containsAll(ids)) {
+        _sel.removeAll(ids);
+      } else {
+        _sel.addAll(ids);
+      }
+    });
   }
 
   // ---------- actions ----------
@@ -133,6 +289,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _onAction(VideoItem v, VideoAction a) async {
+    if (a == VideoAction.select) {
+      _startSelect(v);
+      return;
+    }
     if (v.path.isEmpty) {
       _snack('This video has no readable file path.');
       return;
@@ -151,10 +311,15 @@ class _LibraryScreenState extends State<LibraryScreen>
         await _rename(v);
         break;
       case VideoAction.moveTo:
-        await _transfer(v, move: true);
+        await _transfer(<VideoItem>[v], move: true);
         break;
       case VideoAction.copyTo:
-        await _transfer(v, move: false);
+        await _transfer(<VideoItem>[v], move: false);
+        break;
+      case VideoAction.delete:
+        await _deleteItems(<VideoItem>[v]);
+        break;
+      case VideoAction.select:
         break;
     }
   }
@@ -193,12 +358,15 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  /// Move or copy: pick the destination folder, then do it.
-  Future<void> _transfer(VideoItem v, {required bool move}) async {
+  /// Move or copy one or many videos: pick the destination folder, then do it.
+  Future<void> _transfer(List<VideoItem> all, {required bool move}) async {
+    final items = all.where((v) => v.path.isNotEmpty).toList();
+    if (items.isEmpty) return;
     if (_c.isAndroid && !_c.allFilesAccess) {
       _snack('Allow "All files access" first (menu > Sources).');
       return;
     }
+    PreviewController.instance.stop();
     final dest = await FilePicker.platform.getDirectoryPath(
       dialogTitle: move ? 'Move to...' : 'Copy to...',
     );
@@ -207,15 +375,69 @@ class _LibraryScreenState extends State<LibraryScreen>
       _snack('Could not read that folder as a path. Choose another folder.');
       return;
     }
-    _snack(move ? 'Moving...' : 'Copying...');
-    try {
-      final np = await FileOps.paste(v.path, dest, move: move);
-      if (move) LibraryStore.instance.renamePath(v.path, np);
-      _snack(move ? 'Moved.' : 'Copied.');
-      await _c.refresh();
-    } catch (e) {
-      _snack('Failed: $e');
+    _snack('${move ? 'Moving' : 'Copying'} ${items.length}...');
+    var ok = 0;
+    var failed = 0;
+    for (final v in items) {
+      try {
+        final np = await FileOps.paste(v.path, dest, move: move);
+        if (move) LibraryStore.instance.renamePath(v.path, np);
+        ok++;
+      } catch (_) {
+        failed++;
+      }
     }
+    final word = move ? 'Moved' : 'Copied';
+    _snack(failed == 0 ? '$word $ok.' : '$word $ok, failed $failed.');
+    if (_selecting) _endSelect();
+    await _c.refresh();
+  }
+
+  Future<void> _deleteItems(List<VideoItem> all) async {
+    final items = all.where((v) => v.path.isNotEmpty).toList();
+    if (items.isEmpty) return;
+    if (_c.isAndroid && !_c.allFilesAccess) {
+      _snack('Allow "All files access" first (menu > Sources).');
+      return;
+    }
+    PreviewController.instance.stop();
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(items.length == 1
+            ? 'Delete this video?'
+            : 'Delete ${items.length} videos?'),
+        content: Text(
+          items.length == 1
+              ? '${items.first.name}\n\nThis cannot be undone.'
+              : 'They will be deleted from the device. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    var done = 0;
+    var failed = 0;
+    for (final v in items) {
+      try {
+        await File(v.path).delete();
+        done++;
+      } catch (_) {
+        failed++;
+      }
+    }
+    _snack(failed == 0 ? 'Deleted $done.' : 'Deleted $done, failed $failed.');
+    if (_selecting) _endSelect();
+    await _c.refresh();
   }
 
   /// Tags for one video: search, create, tick. Every tap is saved at once.
@@ -575,100 +797,242 @@ class _LibraryScreenState extends State<LibraryScreen>
       ]),
       builder: (context, _) {
         final s = AppSettings.instance;
-        final store = LibraryStore.instance;
         final list = _visible();
         if (s.viewFolders) {
           _rootKeys = FolderTree.rootKeys(list, _c.browseRoots);
         }
         final inSub = s.viewFolders && _dir != null;
+        final land = MediaQuery.orientationOf(context) == Orientation.landscape;
+        final showHeader = _headerVisible || _searching || _selecting;
 
         return PopScope(
-          canPop: !inSub,
+          canPop: !inSub && !_selecting,
           onPopInvokedWithResult: (didPop, _) {
-            if (!didPop && inSub) {
+            if (didPop) return;
+            if (_selecting) {
+              _endSelect();
+            } else if (inSub) {
               setState(() => _dir = _up(_dir!));
             }
           },
           child: Scaffold(
-            appBar: AppBar(
-              leading: inSub
-                  ? IconButton(
-                      icon: const Icon(Icons.arrow_back),
-                      onPressed: () => setState(() => _dir = _up(_dir!)),
-                    )
-                  : null,
-              title: _searching
-                  ? TextField(
-                      controller: _search,
-                      autofocus: true,
-                      decoration: const InputDecoration(
-                        hintText: 'Search videos or tags',
-                        border: InputBorder.none,
+            body: SafeArea(
+              bottom: false,
+              child: Stack(
+                children: [
+                  Column(
+                    children: [
+                      ClipRect(
+                        child: AnimatedAlign(
+                          alignment: Alignment.topCenter,
+                          heightFactor: showHeader ? 1.0 : 0.0,
+                          duration: const Duration(milliseconds: 180),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _selecting
+                                  ? _selectionBar(land)
+                                  : _topBar(list.length, inSub, land),
+                              if (_searching && !_selecting) _tagStrip(),
+                              if (!_selecting) _sourceRow(land),
+                            ],
+                          ),
+                        ),
                       ),
-                      onChanged: (_) => setState(() {}),
-                    )
-                  : Text(
-                      inSub
-                          ? _c.labelFor(_dir!)
-                          : 'Library (${list.length})',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-              actions: [
-                IconButton(
-                  tooltip: _searching ? 'Close search' : 'Search and tags',
-                  icon: Icon(_searching ? Icons.close : Icons.search),
-                  onPressed: () {
-                    setState(() {
-                      if (_searching) _search.clear();
-                      _searching = !_searching;
-                    });
-                  },
-                ),
-                IconButton(
-                  tooltip: 'Favorites only',
-                  icon: Icon(
-                    store.favoritesOnly
-                        ? Icons.favorite
-                        : Icons.favorite_border,
-                    color: store.favoritesOnly ? Colors.redAccent : null,
+                      _filterBar(),
+                      Expanded(child: _body(list)),
+                    ],
                   ),
-                  onPressed: () =>
-                      store.setFavoritesOnly(!store.favoritesOnly),
-                ),
-                IconButton(
-                  tooltip: 'View options',
-                  icon: const Icon(Icons.tune),
-                  onPressed: _showViewOptions,
-                ),
-                PopupMenuButton<String>(
-                  onSelected: (v) {
-                    if (v == 'sources') _showSources();
-                    if (v == 'settings') _openSettings();
-                    if (v == 'rescan') _c.refresh();
-                  },
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(value: 'sources', child: Text('Sources')),
-                    PopupMenuItem(value: 'rescan', child: Text('Rescan')),
-                    PopupMenuItem(value: 'settings', child: Text('Settings')),
-                  ],
-                ),
-              ],
-            ),
-            body: Stack(
-              children: [
-                Column(
-                  children: [
-                    if (_searching) _tagStrip(),
-                    _filterBar(),
-                    Expanded(child: _body(list)),
-                  ],
-                ),
-                Positioned.fill(child: _largePreview()),
-              ],
+                  Positioned.fill(child: _largePreview()),
+                ],
+              ),
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _btn(IconData icon, String tip, VoidCallback? onTap, {Color? color}) {
+    return IconButton(
+      tooltip: tip,
+      icon: Icon(icon, size: 22, color: color),
+      onPressed: onTap,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  Widget _topBar(int count, bool inSub, bool land) {
+    final store = LibraryStore.instance;
+    final h = land ? 40.0 : 52.0;
+    final title = inSub ? _c.labelFor(_dir!) : 'Library ($count)';
+
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      child: SizedBox(
+        height: h,
+        child: Row(
+          children: [
+            if (inSub)
+              _btn(Icons.arrow_back, 'Back',
+                  () => setState(() => _dir = _up(_dir!)))
+            else
+              const SizedBox(width: 12),
+            Expanded(
+              child: _searching
+                  ? TextField(
+                      controller: _search,
+                      autofocus: true,
+                      style: const TextStyle(fontSize: 15),
+                      decoration: const InputDecoration(
+                        hintText: 'Search videos or tags',
+                        border: InputBorder.none,
+                        isDense: true,
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    )
+                  : Align(
+                      alignment: Alignment.centerLeft,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          softWrap: false,
+                          style: const TextStyle(
+                              fontSize: 17, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ),
+            ),
+            _btn(
+              _searching ? Icons.close : Icons.search,
+              _searching ? 'Close search' : 'Search and tags',
+              () {
+                setState(() {
+                  if (_searching) _search.clear();
+                  _searching = !_searching;
+                });
+              },
+            ),
+            _btn(
+              store.favoritesOnly ? Icons.favorite : Icons.favorite_border,
+              'Favorites only',
+              () => store.setFavoritesOnly(!store.favoritesOnly),
+              color: store.favoritesOnly ? Colors.redAccent : null,
+            ),
+            _btn(Icons.tune, 'View options', _showViewOptions),
+            PopupMenuButton<String>(
+              iconSize: 22,
+              padding: const EdgeInsets.all(9),
+              onSelected: (v) {
+                if (v == 'select') _startSelect();
+                if (v == 'sources') _showSources();
+                if (v == 'settings') _openSettings();
+                if (v == 'rescan') _c.refresh();
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(value: 'select', child: Text('Select')),
+                PopupMenuItem(value: 'sources', child: Text('Sources')),
+                PopupMenuItem(value: 'rescan', child: Text('Rescan')),
+                PopupMenuItem(value: 'settings', child: Text('Settings')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _selectionBar(bool land) {
+    final h = land ? 40.0 : 52.0;
+    final chosen = _selectedItems;
+    return Material(
+      color: const Color(0xFF23233A),
+      child: SizedBox(
+        height: h,
+        child: Row(
+          children: [
+            _btn(Icons.close, 'Cancel', _endSelect),
+            Expanded(
+              child: Text(
+                '${_sel.length} selected',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+            ),
+            _btn(Icons.select_all, 'Select all', _selectAll),
+            _btn(Icons.copy, 'Copy to...',
+                chosen.isEmpty ? null : () => _transfer(chosen, move: false)),
+            _btn(Icons.drive_file_move, 'Move to...',
+                chosen.isEmpty ? null : () => _transfer(chosen, move: true)),
+            _btn(Icons.delete_outline, 'Delete',
+                chosen.isEmpty ? null : () => _deleteItems(chosen)),
+            const SizedBox(width: 4),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// All / Phone / USB chips and the folder-view switch.
+  Widget _sourceRow(bool land) {
+    final s = AppSettings.instance;
+    final hasUsb = _c.drives.any((d) => d.removable) ||
+        _c.items.any((v) => v.source == VideoSource.pendrive);
+
+    final entries = <String, String>{
+      'all': 'All',
+      if (_c.isAndroid) 'phone': 'Phone',
+      if (_c.isWindows) 'pc': 'PC',
+      if (hasUsb) 'pendrive': 'USB',
+    };
+
+    int countOf(String key) => key == 'all'
+        ? _c.items.length
+        : _c.items.where((v) => v.source.name == key).length;
+
+    return SizedBox(
+      height: land ? 38 : 46,
+      child: Row(
+        children: [
+          Expanded(
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              children: [
+                for (final e in entries.entries)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text('${e.value} (${countOf(e.key)})',
+                          style: const TextStyle(fontSize: 12)),
+                      selected: _source == e.key,
+                      onSelected: (_) => setState(() {
+                        _source = e.key;
+                        _dir = null;
+                      }),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          _btn(
+            s.viewFolders ? Icons.grid_view : Icons.folder_open,
+            s.viewFolders ? 'Show all files' : 'Show folders',
+            () {
+              s.setViewFolders(!s.viewFolders);
+              setState(() => _dir = null);
+            },
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
     );
   }
 
@@ -838,19 +1202,19 @@ class _LibraryScreenState extends State<LibraryScreen>
                       right: 0,
                       top: 0,
                       child: Container(
-                        padding: const EdgeInsets.fromLTRB(12, 8, 52, 8),
+                        padding: const EdgeInsets.fromLTRB(10, 5, 46, 5),
                         color: Colors.black45,
                         child: Text(
                           s.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13),
+                          style: const TextStyle(fontSize: 11),
                         ),
                       ),
                     ),
                     Positioned(
                       right: 8,
-                      top: 6,
+                      top: 4,
                       child: PreviewRing(state: s),
                     ),
                     Positioned(
@@ -954,56 +1318,89 @@ class _LibraryScreenState extends State<LibraryScreen>
                 );
               }
 
-              return RefreshIndicator(
-                onRefresh: _c.refresh,
-                child: CustomScrollView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  slivers: [
-                    if (folders.isNotEmpty)
-                      SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, i) {
-                            final f = folders[i];
-                            return ListTile(
-                              leading: const Icon(Icons.folder,
-                                  color: Colors.amber),
-                              title: Text(f.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis),
-                              subtitle: Text(
-                                  '${f.count} video${f.count == 1 ? '' : 's'}'),
-                              trailing: const Icon(Icons.chevron_right),
-                              onTap: () => setState(() => _dir = f.path),
-                            );
-                          },
-                          childCount: folders.length,
-                        ),
-                      ),
-                    SliverPadding(
-                      padding: const EdgeInsets.all(pad),
-                      sliver: SliverGrid(
-                        gridDelegate:
-                            SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: n,
-                          mainAxisSpacing: gap,
-                          crossAxisSpacing: gap,
-                          mainAxisExtent: extent,
-                        ),
-                        delegate: SliverChildBuilderDelegate(
-                          (context, i) {
-                            final item = videos[i];
-                            return VideoCard(
-                              key: ValueKey(item.id),
-                              item: item,
-                              onOpen: () => _openVideo(item),
-                              onAction: (a) => _onAction(item, a),
-                            );
-                          },
-                          childCount: videos.length,
-                        ),
+              return NotificationListener<UserScrollNotification>(
+                onNotification: (n) {
+                  if (n.metrics.axis != Axis.vertical) return false;
+                  if (n.direction == ScrollDirection.reverse &&
+                      _headerVisible &&
+                      n.metrics.pixels > 80) {
+                    setState(() => _headerVisible = false);
+                  } else if (n.direction == ScrollDirection.forward &&
+                      !_headerVisible) {
+                    setState(() => _headerVisible = true);
+                  }
+                  return false;
+                },
+                child: RefreshIndicator(
+                  onRefresh: _c.refresh,
+                  child: ScrollbarTheme(
+                    data: ScrollbarThemeData(
+                      thickness: const WidgetStatePropertyAll<double>(14),
+                      radius: const Radius.circular(7),
+                      thumbColor:
+                          const WidgetStatePropertyAll<Color>(Colors.white54),
+                      minThumbLength: 56,
+                    ),
+                    child: Scrollbar(
+                      controller: _scroll,
+                      interactive: true,
+                      thumbVisibility: true,
+                      child: CustomScrollView(
+                        controller: _scroll,
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        slivers: [
+                          if (folders.isNotEmpty)
+                            SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, i) {
+                                  final f = folders[i];
+                                  return ListTile(
+                                    leading: const Icon(Icons.folder,
+                                        color: Colors.amber),
+                                    title: Text(f.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis),
+                                    subtitle: Text(
+                                        '${f.count} video${f.count == 1 ? '' : 's'}'),
+                                    trailing: const Icon(Icons.chevron_right),
+                                    onTap: () => setState(() => _dir = f.path),
+                                  );
+                                },
+                                childCount: folders.length,
+                              ),
+                            ),
+                          SliverPadding(
+                            padding:
+                                const EdgeInsets.fromLTRB(pad, pad, 22, pad),
+                            sliver: SliverGrid(
+                              gridDelegate:
+                                  SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: n,
+                                mainAxisSpacing: gap,
+                                crossAxisSpacing: gap,
+                                mainAxisExtent: extent,
+                              ),
+                              delegate: SliverChildBuilderDelegate(
+                                (context, i) {
+                                  final item = videos[i];
+                                  return VideoCard(
+                                    key: ValueKey(item.id),
+                                    item: item,
+                                    selecting: _selecting,
+                                    selected: _sel.contains(item.id),
+                                    onToggleSelect: () => _toggleSel(item),
+                                    onOpen: () => _openVideo(item),
+                                    onAction: (a) => _onAction(item, a),
+                                  );
+                                },
+                                childCount: videos.length,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
+                  ),
                 ),
               );
             },
