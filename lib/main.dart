@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'screens/library_screen.dart';
+import 'services/app_settings.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  await AppSettings.instance.load();
   runApp(const OfflinePlayerApp());
 }
 
@@ -21,6 +23,7 @@ class OfflinePlayerApp extends StatelessWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
         colorSchemeSeed: Colors.indigo,
+        scaffoldBackgroundColor: const Color(0xFF0F0F14),
       ),
       home: const LibraryScreen(),
     );
