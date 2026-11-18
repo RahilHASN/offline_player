@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
 
+import '../models/video_item.dart';
+import '../services/app_settings.dart';
 import '../services/library_controller.dart';
+import '../services/preview_controller.dart';
+import '../services/thumbnail_service.dart';
 import '../widgets/video_card.dart';
+import 'player_screen.dart';
+import 'settings_screen.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -14,6 +20,8 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen>
     with WidgetsBindingObserver {
   final LibraryController _c = LibraryController();
+  final TextEditingController _search = TextEditingController();
+  bool _searching = false;
 
   @override
   void initState() {
@@ -25,6 +33,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _search.dispose();
     _c.dispose();
     super.dispose();
   }
@@ -33,7 +42,58 @@ class _LibraryScreenState extends State<LibraryScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _c.onResumed();
+    } else if (state == AppLifecycleState.paused) {
+      PreviewController.instance.stop();
     }
+  }
+
+  List<VideoItem> _visible() {
+    final s = AppSettings.instance;
+    final q = _search.text.trim().toLowerCase();
+    final list = _c.items
+        .where((v) => q.isEmpty || v.name.toLowerCase().contains(q))
+        .toList();
+
+    Duration dur(VideoItem v) =>
+        ThumbnailService.instance.durations[v.id] ??
+        v.duration ??
+        Duration.zero;
+
+    int cmp(VideoItem a, VideoItem b) {
+      switch (s.sortKey) {
+        case 'date':
+          return a.date.compareTo(b.date);
+        case 'length':
+          return dur(a).compareTo(dur(b));
+        case 'size':
+          return a.sizeBytes.compareTo(b.sizeBytes);
+        default:
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
+    }
+
+    list.sort((a, b) => s.sortAsc ? cmp(a, b) : cmp(b, a));
+    return list;
+  }
+
+  void _openVideo(VideoItem item) {
+    if (item.path.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This video has no readable file path.')),
+      );
+      return;
+    }
+    PreviewController.instance.stop();
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => PlayerScreen(item: item)),
+    );
+  }
+
+  void _openSettings() {
+    PreviewController.instance.stop();
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
+    );
   }
 
   void _showSources() {
@@ -149,34 +209,86 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
+  Widget _sortRow(String label, String key) {
+    final s = AppSettings.instance;
+    final selected = s.sortKey == key;
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        if (selected)
+          Icon(s.sortAsc ? Icons.arrow_upward : Icons.arrow_downward, size: 18),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: _c,
+      listenable: Listenable.merge([_c, AppSettings.instance]),
       builder: (context, _) {
+        final list = _visible();
         return Scaffold(
           appBar: AppBar(
-            title: Text('Library (${_c.items.length})'),
+            title: _searching
+                ? TextField(
+                    controller: _search,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: 'Search videos',
+                      border: InputBorder.none,
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  )
+                : Text('Library (${list.length})'),
             actions: [
+              IconButton(
+                tooltip: _searching ? 'Close search' : 'Search',
+                icon: Icon(_searching ? Icons.close : Icons.search),
+                onPressed: () {
+                  setState(() {
+                    if (_searching) _search.clear();
+                    _searching = !_searching;
+                  });
+                },
+              ),
+              PopupMenuButton<String>(
+                tooltip: 'Sort',
+                icon: const Icon(Icons.sort),
+                onSelected: (key) {
+                  final s = AppSettings.instance;
+                  if (key == s.sortKey) {
+                    s.setSort(key, !s.sortAsc);
+                  } else {
+                    s.setSort(key, key == 'name');
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem(value: 'name', child: _sortRow('Name', 'name')),
+                  PopupMenuItem(value: 'date', child: _sortRow('Date', 'date')),
+                  PopupMenuItem(
+                      value: 'length', child: _sortRow('Length', 'length')),
+                  PopupMenuItem(value: 'size', child: _sortRow('Size', 'size')),
+                ],
+              ),
               IconButton(
                 tooltip: 'Sources',
                 icon: const Icon(Icons.usb),
                 onPressed: _showSources,
               ),
               IconButton(
-                tooltip: 'Rescan',
-                icon: const Icon(Icons.refresh),
-                onPressed: _c.loading ? null : _c.refresh,
+                tooltip: 'Settings',
+                icon: const Icon(Icons.settings),
+                onPressed: _openSettings,
               ),
             ],
           ),
-          body: _body(),
+          body: _body(list),
         );
       },
     );
   }
 
-  Widget _body() {
+  Widget _body(List<VideoItem> list) {
     if (_c.loading && _c.items.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -216,6 +328,11 @@ class _LibraryScreenState extends State<LibraryScreen>
         onPressed: _c.refresh,
       );
     }
+    if (list.isEmpty) {
+      return const Center(
+        child: Text('No matches.', style: TextStyle(color: Colors.white54)),
+      );
+    }
     return Column(
       children: [
         if (_c.loading) const LinearProgressIndicator(minHeight: 2),
@@ -223,24 +340,32 @@ class _LibraryScreenState extends State<LibraryScreen>
           Padding(
             padding: const EdgeInsets.all(8),
             child: Text(
-              '${_c.unresolved} videos have an unknown file path (will be handled later).',
+              '${_c.unresolved} videos have an unknown file path and cannot be played.',
               style: const TextStyle(fontSize: 12, color: Colors.orangeAccent),
             ),
           ),
         Expanded(
-          child: GridView.builder(
-            padding: const EdgeInsets.all(8),
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 260,
-              childAspectRatio: 1.0,
-              crossAxisSpacing: 8,
-              mainAxisSpacing: 8,
+          child: RefreshIndicator(
+            onRefresh: _c.refresh,
+            child: GridView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.all(8),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 260,
+                childAspectRatio: 1.0,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+              ),
+              itemCount: list.length,
+              itemBuilder: (context, i) {
+                final item = list[i];
+                return VideoCard(
+                  key: ValueKey(item.id),
+                  item: item,
+                  onOpen: () => _openVideo(item),
+                );
+              },
             ),
-            itemCount: _c.items.length,
-            itemBuilder: (context, i) {
-              final item = _c.items[i];
-              return VideoCard(key: ValueKey(item.id), item: item);
-            },
           ),
         ),
       ],
