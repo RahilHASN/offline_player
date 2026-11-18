@@ -3,11 +3,13 @@ import 'package:media_kit/media_kit.dart';
 
 import 'screens/library_screen.dart';
 import 'services/app_settings.dart';
+import 'services/library_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
   await AppSettings.instance.load();
+  await LibraryStore.instance.load();
   runApp(const OfflinePlayerApp());
 }
 
