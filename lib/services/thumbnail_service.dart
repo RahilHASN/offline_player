@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import '../models/video_item.dart';
+import 'preview_controller.dart';
 
 class ThumbResult {
   final File file;
@@ -35,17 +37,23 @@ class _Shot {
 }
 
 /// Creates thumbnails one at a time and caches them on local storage.
+/// Cards on screen go first. Everything else is made quietly in the background.
 class ThumbnailService {
   ThumbnailService._();
   static final ThumbnailService instance = ThumbnailService._();
 
   Directory? _dir;
   final List<_Job> _queue = <_Job>[];
-  final Set<String> _failed = <String>{};
+  final List<VideoItem> _bg = <VideoItem>[];
+  final Set<String> _bgIds = <String>{};
+  final Map<String, int> _fails = <String, int>{};
   bool _running = false;
 
   /// Durations discovered while making thumbnails (video id -> duration).
   final Map<String, Duration> durations = <String, Duration>{};
+
+  /// Goes up every time a new thumbnail or duration is ready.
+  final ValueNotifier<int> version = ValueNotifier<int>(0);
 
   Future<Directory> _cacheDir() async {
     final existing = _dir;
@@ -97,7 +105,7 @@ class ThumbnailService {
           job.completer.complete(hit);
           return;
         }
-        if (job.cancelled || _failed.contains(v.id)) {
+        if (job.cancelled || (_fails[v.id] ?? 0) >= 3) {
           job.completer.complete(null);
           return;
         }
@@ -110,25 +118,55 @@ class ThumbnailService {
     return ThumbHandle(job.completer.future, () => job.cancelled = true);
   }
 
+  /// Make thumbnails and durations for everything, quietly, in the background.
+  void prefetch(List<VideoItem> items) {
+    for (final v in items) {
+      if (v.path.isEmpty && !v.id.startsWith('a:')) continue;
+      if (_bgIds.add(v.id)) _bg.add(v);
+    }
+    _pump();
+  }
+
   Future<void> _pump() async {
     if (_running) return;
     _running = true;
     try {
-      while (_queue.isNotEmpty) {
-        // newest request first: it is what the person is looking at now
-        final job = _queue.removeLast();
-        if (job.cancelled) {
-          job.completer.complete(null);
-          continue;
+      while (_queue.isNotEmpty || _bg.isNotEmpty) {
+        _Job? job;
+        VideoItem item;
+
+        if (_queue.isNotEmpty) {
+          // newest request first: it is what the person is looking at now
+          job = _queue.removeLast();
+          if (job.cancelled) {
+            job.completer.complete(null);
+            continue;
+          }
+          item = job.item;
+        } else {
+          item = _bg.removeAt(0);
+          // do not compete with a playing preview
+          while (PreviewController.instance.state.value.id != null) {
+            await Future<void>.delayed(const Duration(milliseconds: 400));
+          }
         }
+
         ThumbResult? r;
         try {
-          r = await _generate(job.item);
+          r = await _cached(item);
+          r ??= await _generate(item);
         } catch (_) {
           r = null;
         }
-        if (r == null) _failed.add(job.item.id);
-        job.completer.complete(r);
+
+        if (r == null) {
+          _fails[item.id] = (_fails[item.id] ?? 0) + 1;
+        } else {
+          version.value++;
+        }
+        if (job != null && !job.completer.isCompleted) {
+          job.completer.complete(r);
+        }
       }
     } finally {
       _running = false;
