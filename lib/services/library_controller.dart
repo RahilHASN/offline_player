@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -25,6 +26,13 @@ class LibraryController extends ChangeNotifier {
   String? notice;
   bool _pending = false;
 
+  /// Called when a new pendrive / SD card shows up (Android).
+  void Function(List<String> roots)? onDriveAdded;
+
+  Set<String> _known = <String>{};
+  bool _firstDone = false;
+  Timer? _watch;
+
   bool get isAndroid => Platform.isAndroid;
   bool get isWindows => Platform.isWindows;
   bool get canScanFiles => isWindows || (isAndroid && allFilesAccess);
@@ -48,6 +56,33 @@ class LibraryController extends ChangeNotifier {
     await refresh();
   }
 
+  /// Checks every few seconds for a plugged-in or removed drive.
+  void startWatching() {
+    if (!isAndroid) return;
+    _watch?.cancel();
+    _watch = Timer.periodic(const Duration(seconds: 4), (_) async {
+      if (loading) return;
+      try {
+        final v = await StorageVolumes.androidVolumes();
+        final r = v.map((d) => d.root).toSet();
+        if (r.length != _known.length || !r.containsAll(_known)) {
+          await refresh();
+        }
+      } catch (_) {}
+    });
+  }
+
+  void stopWatching() {
+    _watch?.cancel();
+    _watch = null;
+  }
+
+  @override
+  void dispose() {
+    _watch?.cancel();
+    super.dispose();
+  }
+
   List<String> _minimal(Iterable<String> roots) {
     final list = roots.map(FolderTree.trim).toSet().toList()
       ..sort((a, b) => a.length.compareTo(b.length));
@@ -67,12 +102,21 @@ class LibraryController extends ChangeNotifier {
     error = null;
     notifyListeners();
 
+    var added = <String>[];
+
     try {
       final result = <String, VideoItem>{};
 
       if (isAndroid) {
         allFilesAccess = await Permission.manageExternalStorage.isGranted;
         drives = await StorageVolumes.androidVolumes();
+
+        final now = drives.map((d) => d.root).toSet();
+        if (_firstDone) {
+          added = now.difference(_known).toList();
+        }
+        _known = now;
+        _firstDone = true;
 
         final r = await AndroidScanner.scan();
         permissionDenied = r.permissionDenied;
@@ -128,6 +172,10 @@ class LibraryController extends ChangeNotifier {
 
     loading = false;
     notifyListeners();
+
+    if (added.isNotEmpty) {
+      onDriveAdded?.call(added);
+    }
 
     if (_pending) {
       _pending = false;
