@@ -11,17 +11,23 @@ import '../services/preview_controller.dart';
 import '../services/thumbnail_service.dart';
 import '../utils/format.dart';
 
-enum VideoAction { play, favorite, tags, rename, copyTo, moveTo }
+enum VideoAction { play, favorite, tags, rename, copyTo, moveTo, select, delete }
 
 class VideoCard extends StatefulWidget {
   final VideoItem item;
   final VoidCallback onOpen;
   final void Function(VideoAction) onAction;
+  final bool selecting;
+  final bool selected;
+  final VoidCallback onToggleSelect;
   const VideoCard({
     super.key,
     required this.item,
     required this.onOpen,
     required this.onAction,
+    required this.onToggleSelect,
+    this.selecting = false,
+    this.selected = false,
   });
 
   @override
@@ -35,6 +41,8 @@ class _VideoCardState extends State<VideoCard> {
   File? _thumb;
   Duration? _duration;
   Timer? _hoverTimer;
+  Timer? _retryTimer;
+  int _retries = 0;
   final GlobalKey<PopupMenuButtonState<VideoAction>> _menuKey =
       GlobalKey<PopupMenuButtonState<VideoAction>>();
 
@@ -52,6 +60,8 @@ class _VideoCardState extends State<VideoCard> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.item.id != widget.item.id) {
       _handle?.cancel();
+      _retryTimer?.cancel();
+      _retries = 0;
       _thumb = null;
       _duration = null;
       _load();
@@ -62,6 +72,7 @@ class _VideoCardState extends State<VideoCard> {
   void dispose() {
     _handle?.cancel();
     _hoverTimer?.cancel();
+    _retryTimer?.cancel();
     final id = widget.item.id;
     Future.microtask(() {
       final pc = PreviewController.instance;
@@ -75,14 +86,25 @@ class _VideoCardState extends State<VideoCard> {
     _handle = h;
     h.future.then((r) {
       if (!mounted || _handle != h) return;
+      if (r == null) {
+        if (_retries < 2) {
+          _retries++;
+          _retryTimer?.cancel();
+          _retryTimer = Timer(const Duration(seconds: 4), () {
+            if (mounted) _load();
+          });
+        }
+        return;
+      }
       setState(() {
-        _thumb = r?.file;
-        _duration = r?.duration;
+        _thumb = r.file;
+        _duration = r.duration;
       });
     });
   }
 
   void _startPreview() {
+    if (widget.selecting) return;
     PreviewController.instance.start(widget.item);
   }
 
@@ -109,6 +131,9 @@ class _VideoCardState extends State<VideoCard> {
 
   Widget _buildCard(AppSettings settings, LibraryStore store) {
     final item = widget.item;
+    final selecting = widget.selecting;
+    final selected = widget.selected;
+    final primary = Theme.of(context).colorScheme.primary;
     final shownDuration =
         _duration ?? ThumbnailService.instance.durations[item.id] ?? item.duration;
     final fav = store.isFav(item.path);
@@ -139,7 +164,7 @@ class _VideoCardState extends State<VideoCard> {
               gaplessPlayback: true,
               errorBuilder: (_, __, ___) => const SizedBox.shrink(),
             ),
-          if (!settings.largePreview)
+          if (!settings.largePreview && !selecting)
             Positioned.fill(
               child: ValueListenableBuilder<PreviewState>(
                 valueListenable: PreviewController.instance.state,
@@ -173,12 +198,27 @@ class _VideoCardState extends State<VideoCard> {
                 },
               ),
             ),
-          Positioned(
-            left: 6,
-            top: 6,
-            child: _Badge(text: item.source.label),
-          ),
-          if (item.path.isNotEmpty)
+          if (selected)
+            const Positioned.fill(
+              child: ColoredBox(color: Color(0x553F51B5)),
+            ),
+          if (selecting)
+            Positioned(
+              left: 6,
+              top: 6,
+              child: Icon(
+                selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                size: 26,
+                color: selected ? primary : Colors.white70,
+              ),
+            )
+          else
+            Positioned(
+              left: 6,
+              top: 6,
+              child: _Badge(text: item.source.label),
+            ),
+          if (item.path.isNotEmpty && !selecting)
             Positioned(
               right: 0,
               top: 0,
@@ -219,6 +259,12 @@ class _VideoCardState extends State<VideoCard> {
     Widget card = Card(
       clipBehavior: Clip.antiAlias,
       margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: selected
+            ? BorderSide(color: primary, width: 2.5)
+            : BorderSide.none,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -253,6 +299,7 @@ class _VideoCardState extends State<VideoCard> {
                   PopupMenuButton<VideoAction>(
                     key: _menuKey,
                     tooltip: 'More',
+                    enabled: !selecting,
                     onOpened: _stopPreview,
                     onSelected: widget.onAction,
                     itemBuilder: (context) => [
@@ -270,6 +317,10 @@ class _VideoCardState extends State<VideoCard> {
                         value: VideoAction.tags,
                         child: Text('Tags...'),
                       ),
+                      const PopupMenuItem(
+                        value: VideoAction.select,
+                        child: Text('Select'),
+                      ),
                       const PopupMenuDivider(),
                       const PopupMenuItem(
                         value: VideoAction.rename,
@@ -282,6 +333,11 @@ class _VideoCardState extends State<VideoCard> {
                       const PopupMenuItem(
                         value: VideoAction.copyTo,
                         child: Text('Copy to...'),
+                      ),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
+                        value: VideoAction.delete,
+                        child: Text('Delete'),
                       ),
                     ],
                     child: const SizedBox(
@@ -299,13 +355,13 @@ class _VideoCardState extends State<VideoCard> {
     );
 
     card = GestureDetector(
-      onTap: _open,
-      onSecondaryTap: _isWindows
+      onTap: selecting ? widget.onToggleSelect : _open,
+      onSecondaryTap: (_isWindows && !selecting)
           ? () => _menuKey.currentState?.showButtonMenu()
           : null,
-      onLongPressStart: _isAndroid ? (_) => _startPreview() : null,
-      onLongPressEnd: _isAndroid ? (_) => _stopPreview() : null,
-      onLongPressCancel: _isAndroid ? _stopPreview : null,
+      onLongPressStart: (_isAndroid && !selecting) ? (_) => _startPreview() : null,
+      onLongPressEnd: (_isAndroid && !selecting) ? (_) => _stopPreview() : null,
+      onLongPressCancel: (_isAndroid && !selecting) ? _stopPreview : null,
       child: card,
     );
 
