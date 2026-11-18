@@ -6,11 +6,14 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/video_item.dart';
+import 'folder_tree.dart';
 import 'scanner_android.dart';
 import 'scanner_desktop.dart';
 import 'storage_volumes.dart';
 
 class LibraryController extends ChangeNotifier {
+  static const phoneRoot = '/storage/emulated/0';
+
   List<VideoItem> items = <VideoItem>[];
   List<String> folders = <String>[];
   List<DriveInfo> drives = <DriveInfo>[];
@@ -26,10 +29,33 @@ class LibraryController extends ChangeNotifier {
   bool get isWindows => Platform.isWindows;
   bool get canScanFiles => isWindows || (isAndroid && allFilesAccess);
 
+  /// Starting points for the folder view.
+  List<String> get browseRoots {
+    if (isAndroid) {
+      return <String>[phoneRoot, ...drives.map((d) => d.root), ...folders];
+    }
+    return List<String>.of(folders);
+  }
+
+  String labelFor(String path) {
+    if (isAndroid && path == phoneRoot) return 'Phone storage';
+    return FolderTree.nameOf(path);
+  }
+
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     folders = prefs.getStringList('folders') ?? <String>[];
     await refresh();
+  }
+
+  List<String> _minimal(Iterable<String> roots) {
+    final list = roots.map(FolderTree.trim).toSet().toList()
+      ..sort((a, b) => a.length.compareTo(b.length));
+    final out = <String>[];
+    for (final r in list) {
+      if (!out.any((o) => r == o || r.startsWith('$o/'))) out.add(r);
+    }
+    return out;
   }
 
   Future<void> refresh() async {
@@ -53,7 +79,9 @@ class LibraryController extends ChangeNotifier {
 
         final fileItems = <VideoItem>[];
         if (allFilesAccess) {
-          final roots = <String>{...drives.map((d) => d.root), ...folders};
+          final roots = _minimal(
+            <String>{phoneRoot, ...drives.map((d) => d.root), ...folders},
+          );
           for (final root in roots) {
             final found = await DesktopScanner.scanFolder(
               root,
@@ -67,15 +95,10 @@ class LibraryController extends ChangeNotifier {
           for (final v in r.items)
             if (v.path.isNotEmpty) v.path,
         };
-        final fileNames = <String>{
-          for (final v in fileItems) v.name.toLowerCase(),
-        };
 
         for (final v in r.items) {
-          // hide library entries we cannot open if the same file was found by folder scan
-          if (v.path.isEmpty && fileNames.contains(v.name.toLowerCase())) {
-            continue;
-          }
+          // with full file access, entries whose file is gone are stale
+          if (v.path.isEmpty && allFilesAccess) continue;
           result[v.id] = v;
         }
         for (final v in fileItems) {
