@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -62,12 +63,23 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   // ---------- data ----------
 
+  String get _tagQuery =>
+      _search.text.trim().replaceAll(RegExp(r'^#+'), '').trim();
+
   List<VideoItem> _visible() {
     final s = AppSettings.instance;
     final store = LibraryStore.instance;
-    final q = _search.text.trim().toLowerCase();
+    final raw = _search.text.trim().toLowerCase();
+    final tagOnly = raw.startsWith('#');
+    final tq = _tagQuery.toLowerCase();
+
     final list = _c.items.where((v) {
-      if (q.isNotEmpty && !v.name.toLowerCase().contains(q)) return false;
+      if (tq.isNotEmpty) {
+        final tagHit =
+            store.tagsFor(v.path).any((t) => t.toLowerCase().contains(tq));
+        final nameHit = !tagOnly && v.name.toLowerCase().contains(tq);
+        if (!tagHit && !nameHit) return false;
+      }
       if (store.filtering && !store.matches(v.path)) return false;
       return true;
     }).toList();
@@ -133,18 +145,16 @@ class _LibraryScreenState extends State<LibraryScreen>
         LibraryStore.instance.toggleFav(v.path);
         break;
       case VideoAction.tags:
-        await _editTags(v);
+        _editTags(v);
         break;
       case VideoAction.rename:
         await _rename(v);
         break;
-      case VideoAction.copy:
-        FileClipboard.instance.set(v.path, cut: false);
-        _snack('Copied. Open the folder you want and tap Paste here.');
+      case VideoAction.moveTo:
+        await _transfer(v, move: true);
         break;
-      case VideoAction.cut:
-        FileClipboard.instance.set(v.path, cut: true);
-        _snack('Cut. Open the folder you want and tap Paste here.');
+      case VideoAction.copyTo:
+        await _transfer(v, move: false);
         break;
     }
   }
@@ -183,228 +193,159 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  Future<void> _paste() async {
-    final cb = FileClipboard.instance;
-    final src = cb.path;
-    if (src == null) return;
-    final dest = _dir;
-    if (!AppSettings.instance.viewFolders || dest == null) {
-      _snack('Open Folders view and go into the folder where you want to paste.');
+  /// Move or copy: pick the destination folder, then do it.
+  Future<void> _transfer(VideoItem v, {required bool move}) async {
+    if (_c.isAndroid && !_c.allFilesAccess) {
+      _snack('Allow "All files access" first (menu > Sources).');
       return;
     }
+    final dest = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: move ? 'Move to...' : 'Copy to...',
+    );
+    if (dest == null) return;
+    if (_c.isAndroid && !dest.startsWith('/')) {
+      _snack('Could not read that folder as a path. Choose another folder.');
+      return;
+    }
+    _snack(move ? 'Moving...' : 'Copying...');
     try {
-      final np = await FileOps.paste(src, dest, move: cb.isCut);
-      if (cb.isCut) LibraryStore.instance.renamePath(src, np);
-      cb.clear();
-      _snack('Done.');
+      final np = await FileOps.paste(v.path, dest, move: move);
+      if (move) LibraryStore.instance.renamePath(v.path, np);
+      _snack(move ? 'Moved.' : 'Copied.');
       await _c.refresh();
     } catch (e) {
       _snack('Failed: $e');
     }
   }
 
-  Future<void> _editTags(VideoItem v) async {
+  /// Tags for one video: search, create, tick. Every tap is saved at once.
+  void _editTags(VideoItem v) {
     final store = LibraryStore.instance;
-    final sel = <String>{...store.tagsFor(v.path)};
     final ctrl = TextEditingController();
-    await showDialog<void>(
+
+    void create() {
+      final n = store.createTag(ctrl.text);
+      if (n != null) {
+        store.setTags(v.path, <String>{...store.tagsFor(v.path), n});
+        ctrl.clear();
+      }
+    }
+
+    showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setS) {
-          final tags = store.tags;
-          return AlertDialog(
-            title: const Text('Tags'),
-            content: SizedBox(
-              width: 360,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (tags.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.only(bottom: 8),
-                        child: Text(
-                          'No tags yet. Type a name below to create one.',
-                          style: TextStyle(color: Colors.white54),
-                        ),
-                      ),
-                    for (final t in tags)
-                      CheckboxListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        value: sel.contains(t),
-                        title: Text(t),
-                        onChanged: (b) => setS(() {
-                          if (b == true) {
-                            sel.add(t);
-                          } else {
-                            sel.remove(t);
-                          }
-                        }),
-                      ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: ctrl,
-                            decoration:
-                                const InputDecoration(hintText: 'New tag'),
-                            onSubmitted: (_) {
-                              final n = store.createTag(ctrl.text);
-                              if (n != null) sel.add(n);
-                              ctrl.clear();
-                              setS(() {});
-                            },
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => ListenableBuilder(
+        listenable: Listenable.merge([store, ctrl]),
+        builder: (ctx, _) {
+          final q = ctrl.text.trim().replaceAll(RegExp(r'^#+'), '').trim();
+          final cur = store.tagsFor(v.path);
+          final shown = store.tags
+              .where((t) =>
+                  q.isEmpty || t.toLowerCase().contains(q.toLowerCase()))
+              .toList();
+          final exists =
+              store.tags.any((t) => t.toLowerCase() == q.toLowerCase());
+          return Padding(
+            padding: EdgeInsets.fromLTRB(
+                16, 0, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  v.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  textInputAction: TextInputAction.done,
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search),
+                    hintText: 'Search or create a tag',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onSubmitted: (_) => create(),
+                ),
+                if (q.isNotEmpty && !exists)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.add_circle_outline),
+                    title: Text('Create "$q" and add it to this video'),
+                    onTap: create,
+                  ),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      if (store.tags.isEmpty && q.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 12),
+                          child: Text(
+                            'No tags yet. Type a name above to create one.',
+                            style: TextStyle(color: Colors.white54),
                           ),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.add),
-                          onPressed: () {
-                            final n = store.createTag(ctrl.text);
-                            if (n != null) sel.add(n);
-                            ctrl.clear();
-                            setS(() {});
+                      for (final t in shown)
+                        CheckboxListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          value: cur.contains(t),
+                          title: Text(t),
+                          onChanged: (b) {
+                            final next = <String>{...store.tagsFor(v.path)};
+                            if (b == true) {
+                              next.add(t);
+                            } else {
+                              next.remove(t);
+                            }
+                            store.setTags(v.path, next);
                           },
                         ),
-                      ],
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Done'),
+                  ),
+                ),
+              ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  store.setTags(v.path, sel);
-                  Navigator.pop(ctx);
-                },
-                child: const Text('Save'),
-              ),
-            ],
           );
         },
       ),
     );
   }
 
-  void _showTagFilter() {
-    final ctrl = TextEditingController();
-    showModalBottomSheet<void>(
+  Future<void> _confirmDeleteTag(String t) async {
+    final ok = await showDialog<bool>(
       context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) => ListenableBuilder(
-        listenable: LibraryStore.instance,
-        builder: (ctx, _) {
-          final store = LibraryStore.instance;
-          return Padding(
-            padding: EdgeInsets.fromLTRB(
-                16, 0, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Filter by tags',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  if (store.tags.isEmpty)
-                    const Text(
-                      'No tags yet. Create one below, then tag videos from the ⋮ menu.',
-                      style: TextStyle(color: Colors.white54),
-                    ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      for (final t in store.tags)
-                        GestureDetector(
-                          onLongPress: () async {
-                            final ok = await showDialog<bool>(
-                              context: ctx,
-                              builder: (dctx) => AlertDialog(
-                                title: Text('Delete tag "$t"?'),
-                                content: const Text(
-                                    'It will be removed from all videos.'),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(dctx, false),
-                                    child: const Text('Cancel'),
-                                  ),
-                                  FilledButton(
-                                    onPressed: () =>
-                                        Navigator.pop(dctx, true),
-                                    child: const Text('Delete'),
-                                  ),
-                                ],
-                              ),
-                            );
-                            if (ok == true) store.deleteTag(t);
-                          },
-                          child: FilterChip(
-                            label: Text('$t (${store.countFor(t)})'),
-                            selected: store.selected.contains(t),
-                            onSelected: (_) => store.toggleSelected(t),
-                          ),
-                        ),
-                    ],
-                  ),
-                  if (store.tags.isNotEmpty)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 4),
-                      child: Text('Long-press a tag to delete it.',
-                          style:
-                              TextStyle(fontSize: 11, color: Colors.white38)),
-                    ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Must have all selected tags'),
-                    subtitle: const Text('Off = any of the selected tags'),
-                    value: store.matchAll,
-                    onChanged: store.setMatchAll,
-                  ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: ctrl,
-                          decoration:
-                              const InputDecoration(hintText: 'New tag'),
-                          onSubmitted: (_) {
-                            store.createTag(ctrl.text);
-                            ctrl.clear();
-                          },
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.add),
-                        onPressed: () {
-                          store.createTag(ctrl.text);
-                          ctrl.clear();
-                        },
-                      ),
-                    ],
-                  ),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton(
-                      onPressed: store.clearFilters,
-                      child: const Text('Clear filters'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
+      builder: (dctx) => AlertDialog(
+        title: Text('Delete tag "$t"?'),
+        content: const Text('It will be removed from all videos.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
+    if (ok == true) LibraryStore.instance.deleteTag(t);
   }
 
   void _showViewOptions() {
@@ -631,7 +572,6 @@ class _LibraryScreenState extends State<LibraryScreen>
         _c,
         AppSettings.instance,
         LibraryStore.instance,
-        FileClipboard.instance,
       ]),
       builder: (context, _) {
         final s = AppSettings.instance;
@@ -662,7 +602,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                       controller: _search,
                       autofocus: true,
                       decoration: const InputDecoration(
-                        hintText: 'Search videos',
+                        hintText: 'Search videos or tags',
                         border: InputBorder.none,
                       ),
                       onChanged: (_) => setState(() {}),
@@ -675,7 +615,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                     ),
               actions: [
                 IconButton(
-                  tooltip: _searching ? 'Close search' : 'Search',
+                  tooltip: _searching ? 'Close search' : 'Search and tags',
                   icon: Icon(_searching ? Icons.close : Icons.search),
                   onPressed: () {
                     setState(() {
@@ -694,15 +634,6 @@ class _LibraryScreenState extends State<LibraryScreen>
                   ),
                   onPressed: () =>
                       store.setFavoritesOnly(!store.favoritesOnly),
-                ),
-                IconButton(
-                  tooltip: 'Tags',
-                  icon: Icon(
-                    store.selected.isEmpty
-                        ? Icons.label_outline
-                        : Icons.label,
-                  ),
-                  onPressed: _showTagFilter,
                 ),
                 IconButton(
                   tooltip: 'View options',
@@ -727,7 +658,7 @@ class _LibraryScreenState extends State<LibraryScreen>
               children: [
                 Column(
                   children: [
-                    _clipboardBanner(),
+                    if (_searching) _tagStrip(),
                     _filterBar(),
                     Expanded(child: _body(list)),
                   ],
@@ -741,37 +672,76 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  Widget _clipboardBanner() {
-    final cb = FileClipboard.instance;
-    final p = cb.path;
-    if (p == null) return const SizedBox.shrink();
-    final canPaste = AppSettings.instance.viewFolders && _dir != null;
-    return Material(
-      color: const Color(0xFF23233A),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        child: Row(
-          children: [
-            Icon(cb.isCut ? Icons.content_cut : Icons.copy, size: 18),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                '${cb.isCut ? 'Cut' : 'Copied'}: ${FolderTree.nameOf(p)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13),
-              ),
-            ),
-            TextButton(
-              onPressed: _paste,
-              child: Text(canPaste ? 'Paste here' : 'Paste...'),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close, size: 18),
-              onPressed: cb.clear,
-            ),
-          ],
+  /// Tags under the search bar: pick to filter, create when nothing matches.
+  Widget _tagStrip() {
+    final store = LibraryStore.instance;
+    final q = _tagQuery;
+    final ql = q.toLowerCase();
+    final exists = store.tags.any((t) => t.toLowerCase() == ql);
+    final shown = store.tags
+        .where((t) => ql.isEmpty || t.toLowerCase().contains(ql))
+        .toList();
+
+    final chips = <Widget>[];
+
+    if (q.isNotEmpty && !exists) {
+      chips.add(Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: ActionChip(
+          avatar: const Icon(Icons.add, size: 16),
+          label: Text('Create tag "$q"'),
+          onPressed: () {
+            final n = store.createTag(q);
+            if (n != null) {
+              setState(() => _search.clear());
+              _snack('Tag "$n" created. Add it to videos from the ⋮ menu.');
+            }
+          },
         ),
+      ));
+    }
+
+    if (store.selected.length > 1) {
+      chips.add(Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: ActionChip(
+          avatar: const Icon(Icons.filter_alt, size: 16),
+          label: Text(store.matchAll ? 'Match: all' : 'Match: any'),
+          onPressed: () => store.setMatchAll(!store.matchAll),
+        ),
+      ));
+    }
+
+    for (final t in shown) {
+      chips.add(Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: GestureDetector(
+          onLongPress: () => _confirmDeleteTag(t),
+          child: FilterChip(
+            label: Text('$t (${store.countFor(t)})'),
+            selected: store.selected.contains(t),
+            onSelected: (_) => store.toggleSelected(t),
+          ),
+        ),
+      ));
+    }
+
+    if (chips.isEmpty) {
+      chips.add(const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: Text(
+          'Type a name to create a tag.',
+          style: TextStyle(color: Colors.white54, fontSize: 13),
+        ),
+      ));
+    }
+
+    return SizedBox(
+      height: 48,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        children: chips,
       ),
     );
   }
@@ -819,68 +789,77 @@ class _LibraryScreenState extends State<LibraryScreen>
         if (!AppSettings.instance.largePreview || s.video == null) {
           return const SizedBox.shrink();
         }
-        final w = MediaQuery.sizeOf(context).width;
-        final pw = min(w * 0.94, 780.0);
+        final size = MediaQuery.sizeOf(context);
+        final maxW = min(size.width * 0.94, 780.0);
+        final maxH = size.height * 0.72;
+        var pw = maxW;
+        var ph = pw / s.aspect;
+        if (ph > maxH) {
+          ph = maxH;
+          pw = ph * s.aspect;
+        }
         return IgnorePointer(
           child: Container(
             color: Colors.black54,
             alignment: Alignment.center,
             child: SizedBox(
               width: pw,
-              child: AspectRatio(
-                aspectRatio: 16 / 9,
-                child: Container(
-                  clipBehavior: Clip.antiAlias,
-                  decoration: BoxDecoration(
-                    color: Colors.black,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: Colors.white24),
-                  ),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (!s.ready)
-                        const Center(
-                          child: SizedBox(
-                            width: 28,
-                            height: 28,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ),
-                      AnimatedOpacity(
-                        opacity: s.ready ? 1 : 0,
-                        duration: const Duration(milliseconds: 150),
-                        child: Video(
-                          controller: s.video!,
-                          controls: NoVideoControls,
-                          fit: BoxFit.contain,
-                          fill: Colors.black,
+              height: ph,
+              child: Container(
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (!s.ready)
+                      const Center(
+                        child: SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        top: 0,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 8),
-                          color: Colors.black45,
-                          child: Text(
-                            s.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 13),
-                          ),
+                    AnimatedOpacity(
+                      opacity: s.ready ? 1 : 0,
+                      duration: const Duration(milliseconds: 150),
+                      child: Video(
+                        controller: s.video!,
+                        controls: NoVideoControls,
+                        fit: BoxFit.contain,
+                        fill: Colors.black,
+                      ),
+                    ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      top: 0,
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 52, 8),
+                        color: Colors.black45,
+                        child: Text(
+                          s.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13),
                         ),
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: CutBar(cut: s.cut, total: s.total),
-                      ),
-                    ],
-                  ),
+                    ),
+                    Positioned(
+                      right: 8,
+                      top: 6,
+                      child: PreviewRing(state: s),
+                    ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: PreviewBar(state: s),
+                    ),
+                  ],
                 ),
               ),
             ),
