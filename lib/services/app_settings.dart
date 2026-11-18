@@ -13,6 +13,11 @@ class AppSettings extends ChangeNotifier {
   String sortKey = 'name'; // name, date, length, size
   bool sortAsc = true;
 
+  /// 0 = auto, otherwise 1, 2 or 3 columns.
+  int columns = 0;
+  bool largePreview = true;
+  bool viewFolders = false;
+
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     _prefs = p;
@@ -21,6 +26,9 @@ class AppSettings extends ChangeNotifier {
     clipSeconds = (p.getDouble('clipSeconds') ?? 1.5).clamp(1.0, 3.0).toDouble();
     sortKey = p.getString('sortKey') ?? 'name';
     sortAsc = p.getBool('sortAsc') ?? true;
+    columns = (p.getInt('columns') ?? 0).clamp(0, 3).toInt();
+    largePreview = p.getBool('largePreview') ?? true;
+    viewFolders = p.getBool('viewFolders') ?? false;
   }
 
   void setPreviewAudio(bool v) {
@@ -46,6 +54,24 @@ class AppSettings extends ChangeNotifier {
     sortAsc = asc;
     _prefs?.setString('sortKey', key);
     _prefs?.setBool('sortAsc', asc);
+    notifyListeners();
+  }
+
+  void setColumns(int v) {
+    columns = v.clamp(0, 3).toInt();
+    _prefs?.setInt('columns', columns);
+    notifyListeners();
+  }
+
+  void setLargePreview(bool v) {
+    largePreview = v;
+    _prefs?.setBool('largePreview', v);
+    notifyListeners();
+  }
+
+  void setViewFolders(bool v) {
+    viewFolders = v;
+    _prefs?.setBool('viewFolders', v);
     notifyListeners();
   }
 }
