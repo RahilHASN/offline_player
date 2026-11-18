@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,7 +9,11 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/video_item.dart';
+import '../services/seek_previewer.dart';
 import '../utils/format.dart';
+
+/// Software brightness: 1.0 = normal, lower = darker.
+final ValueNotifier<double> _brightness = ValueNotifier<double>(1.0);
 
 class PlayerScreen extends StatefulWidget {
   final VideoItem item;
@@ -20,12 +26,14 @@ class PlayerScreen extends StatefulWidget {
 class _PlayerScreenState extends State<PlayerScreen> {
   late final Player _player = Player();
   late final VideoController _video = VideoController(_player);
+  late final SeekPreviewer _previewer = SeekPreviewer(widget.item.path);
   StreamSubscription<String>? _errSub;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _brightness.value = 1.0;
     _errSub = _player.stream.error.listen((e) {
       if (mounted) setState(() => _error = e);
     });
@@ -35,6 +43,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _errSub?.cancel();
+    _previewer.dispose();
     _player.dispose();
     super.dispose();
   }
@@ -51,6 +60,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               controls: (state) => PlayerControls(
                 state: state,
                 player: _player,
+                previewer: _previewer,
                 title: widget.item.name,
               ),
             ),
@@ -75,12 +85,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
 class PlayerControls extends StatefulWidget {
   final VideoState state;
   final Player player;
+  final SeekPreviewer previewer;
   final String title;
 
   const PlayerControls({
     super.key,
     required this.state,
     required this.player,
+    required this.previewer,
     required this.title,
   });
 
@@ -96,6 +108,17 @@ class _PlayerControlsState extends State<PlayerControls> {
   Offset _lastTap = Offset.zero;
   final FocusNode _focus = FocusNode();
 
+  // swipe-to-seek
+  Duration? _swipeTarget;
+  Duration _swipeStart = Duration.zero;
+  double _swipeDx = 0;
+
+  // volume / brightness swipe
+  String? _hudKind; // 'volume' or 'brightness'
+  double _hudValue = 0;
+  double _vValue = 0;
+  Timer? _hudTimer;
+
   Player get _p => widget.player;
   bool get _desktop => Platform.isWindows;
 
@@ -108,6 +131,7 @@ class _PlayerControlsState extends State<PlayerControls> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _hudTimer?.cancel();
     _focus.dispose();
     super.dispose();
   }
@@ -160,6 +184,62 @@ class _PlayerControlsState extends State<PlayerControls> {
     }
   }
 
+  // ---- swipe left/right: seek ----
+  void _hStart(DragStartDetails d) {
+    _swipeStart = _p.state.position;
+    _swipeDx = 0;
+    _swipeTarget = _swipeStart;
+  }
+
+  void _hUpdate(DragUpdateDetails d) {
+    final total = _p.state.duration;
+    if (total <= Duration.zero) return;
+    final w = context.size?.width ?? 400;
+    _swipeDx += d.delta.dx;
+    final span = min(total.inMilliseconds.toDouble(), 120000.0);
+    final ms = (_swipeStart.inMilliseconds + _swipeDx / w * span)
+        .clamp(0.0, total.inMilliseconds.toDouble())
+        .toDouble();
+    final t = Duration(milliseconds: ms.round());
+    widget.previewer.request(t);
+    setState(() => _swipeTarget = t);
+  }
+
+  void _hEnd([DragEndDetails? d]) {
+    final t = _swipeTarget;
+    if (t != null) _p.seek(t);
+    setState(() => _swipeTarget = null);
+  }
+
+  // ---- swipe up/down: volume (left) / brightness (right) ----
+  void _vStart(DragStartDetails d) {
+    final w = context.size?.width ?? 400;
+    _hudTimer?.cancel();
+    _hudKind = d.localPosition.dx < w / 2 ? 'volume' : 'brightness';
+    _vValue = _hudKind == 'volume'
+        ? (_p.state.volume / 100).clamp(0.0, 1.0).toDouble()
+        : _brightness.value;
+    setState(() => _hudValue = _vValue);
+  }
+
+  void _vUpdate(DragUpdateDetails d) {
+    final h = context.size?.height ?? 600;
+    _vValue = (_vValue - d.delta.dy / (h * 0.7)).clamp(0.0, 1.0).toDouble();
+    if (_hudKind == 'volume') {
+      _p.setVolume(_vValue * 100);
+    } else {
+      _brightness.value = max(0.15, _vValue);
+    }
+    setState(() => _hudValue = _vValue);
+  }
+
+  void _vEnd([DragEndDetails? d]) {
+    _hudTimer?.cancel();
+    _hudTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted) setState(() => _hudKind = null);
+    });
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
     if (e is! KeyDownEvent && e is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
@@ -198,6 +278,7 @@ class _PlayerControlsState extends State<PlayerControls> {
 
   @override
   Widget build(BuildContext context) {
+    final screenW = MediaQuery.sizeOf(context).width;
     return Focus(
       focusNode: _focus,
       autofocus: true,
@@ -214,6 +295,19 @@ class _PlayerControlsState extends State<PlayerControls> {
           },
           child: Stack(
             children: [
+              // brightness dimmer
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: _brightness,
+                    builder: (context, b, _) {
+                      final op = (1 - b).clamp(0.0, 0.85).toDouble();
+                      return ColoredBox(color: Color.fromRGBO(0, 0, 0, op));
+                    },
+                  ),
+                ),
+              ),
+              // gestures
               Positioned.fill(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
@@ -229,8 +323,17 @@ class _PlayerControlsState extends State<PlayerControls> {
                           : const Duration(seconds: 10));
                     }
                   },
+                  onHorizontalDragStart: _desktop ? null : _hStart,
+                  onHorizontalDragUpdate: _desktop ? null : _hUpdate,
+                  onHorizontalDragEnd: _desktop ? null : _hEnd,
+                  onHorizontalDragCancel: _desktop ? null : _hEnd,
+                  onVerticalDragStart: _desktop ? null : _vStart,
+                  onVerticalDragUpdate: _desktop ? null : _vUpdate,
+                  onVerticalDragEnd: _desktop ? null : _vEnd,
+                  onVerticalDragCancel: _desktop ? null : _vEnd,
                 ),
               ),
+              // controls
               Positioned.fill(
                 child: IgnorePointer(
                   ignoring: !_visible,
@@ -241,8 +344,86 @@ class _PlayerControlsState extends State<PlayerControls> {
                   ),
                 ),
               ),
+              // swipe-seek preview
+              if (_swipeTarget != null)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: Center(
+                      child: _PreviewBox(
+                        previewer: widget.previewer,
+                        label: _swipeLabel(),
+                      ),
+                    ),
+                  ),
+                ),
+              // volume / brightness indicator
+              if (_hudKind != null)
+                Positioned(
+                  top: 40,
+                  left: 0,
+                  right: 0,
+                  child: IgnorePointer(child: Center(child: _hud())),
+                ),
+              // slider-drag preview
+              if (_dragging) _sliderPreview(screenW),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  String _swipeLabel() {
+    final t = _swipeTarget ?? Duration.zero;
+    final diff = t - _swipeStart;
+    final sign = diff.isNegative ? '-' : '+';
+    return '${formatDuration(t)}  ($sign${diff.inSeconds.abs()}s)';
+  }
+
+  Widget _hud() {
+    final isVol = _hudKind == 'volume';
+    IconData icon;
+    if (isVol) {
+      icon = _hudValue <= 0 ? Icons.volume_off : Icons.volume_up;
+    } else {
+      icon = Icons.brightness_6;
+    }
+    return Container(
+      width: 180,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(value: _hudValue, minHeight: 6),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text('${(_hudValue * 100).round()}',
+              style: const TextStyle(fontSize: 13)),
+        ],
+      ),
+    );
+  }
+
+  Widget _sliderPreview(double screenW) {
+    final total = _p.state.duration.inMilliseconds.toDouble();
+    final frac = total > 0 ? (_dragValue / total).clamp(0.0, 1.0) : 0.0;
+    final x = (60 + frac * (screenW - 120)).clamp(96.0, screenW - 96).toDouble();
+    return Positioned(
+      left: x - 88,
+      bottom: 130,
+      child: IgnorePointer(
+        child: _PreviewBox(
+          previewer: widget.previewer,
+          label: formatDuration(Duration(milliseconds: _dragValue.round())),
         ),
       ),
     );
@@ -275,7 +456,44 @@ class _PlayerControlsState extends State<PlayerControls> {
             ],
           ),
         ),
-        const Spacer(),
+        Expanded(
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  iconSize: 40,
+                  icon: const Icon(Icons.replay_10),
+                  onPressed: () => _seekBy(const Duration(seconds: -10)),
+                ),
+                const SizedBox(width: 12),
+                StreamBuilder<bool>(
+                  stream: _p.stream.playing,
+                  initialData: _p.state.playing,
+                  builder: (context, s) {
+                    final playing = s.data ?? false;
+                    return IconButton(
+                      iconSize: 64,
+                      icon: Icon(playing
+                          ? Icons.pause_circle_filled
+                          : Icons.play_circle_fill),
+                      onPressed: () {
+                        _p.playOrPause();
+                        _scheduleHide();
+                      },
+                    );
+                  },
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  iconSize: 40,
+                  icon: const Icon(Icons.forward_10),
+                  onPressed: () => _seekBy(const Duration(seconds: 10)),
+                ),
+              ],
+            ),
+          ),
+        ),
         Container(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
@@ -334,12 +552,18 @@ class _PlayerControlsState extends State<PlayerControls> {
                       max: max > 0 ? max : 1,
                       onChangeStart: (v) {
                         _hideTimer?.cancel();
+                        widget.previewer.request(
+                            Duration(milliseconds: v.round()));
                         setState(() {
                           _dragging = true;
                           _dragValue = v;
                         });
                       },
-                      onChanged: (v) => setState(() => _dragValue = v),
+                      onChanged: (v) {
+                        widget.previewer.request(
+                            Duration(milliseconds: v.round()));
+                        setState(() => _dragValue = v);
+                      },
                       onChangeEnd: (v) {
                         _p.seek(Duration(milliseconds: v.round()));
                         setState(() => _dragging = false);
@@ -366,31 +590,8 @@ class _PlayerControlsState extends State<PlayerControls> {
 
   Widget _buttonRow() {
     return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
       children: [
-        StreamBuilder<bool>(
-          stream: _p.stream.playing,
-          initialData: _p.state.playing,
-          builder: (context, s) {
-            final playing = s.data ?? false;
-            return IconButton(
-              iconSize: 32,
-              icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-              onPressed: () {
-                _p.playOrPause();
-                _scheduleHide();
-              },
-            );
-          },
-        ),
-        IconButton(
-          icon: const Icon(Icons.replay_10),
-          onPressed: () => _seekBy(const Duration(seconds: -10)),
-        ),
-        IconButton(
-          icon: const Icon(Icons.forward_10),
-          onPressed: () => _seekBy(const Duration(seconds: 10)),
-        ),
-        const Spacer(),
         if (_desktop)
           StreamBuilder<double>(
             stream: _p.stream.volume,
@@ -446,6 +647,67 @@ class _PlayerControlsState extends State<PlayerControls> {
           onPressed: _toggleFullscreen,
         ),
       ],
+    );
+  }
+}
+
+/// Rounded picture box shown while seeking.
+class _PreviewBox extends StatelessWidget {
+  final SeekPreviewer previewer;
+  final String label;
+  const _PreviewBox({required this.previewer, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 176,
+      height: 99,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white70, width: 1.5),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ValueListenableBuilder<Uint8List?>(
+            valueListenable: previewer.image,
+            builder: (context, bytes, _) {
+              if (bytes == null) {
+                return const Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                );
+              }
+              return Image.memory(
+                bytes,
+                fit: BoxFit.cover,
+                cacheWidth: 352,
+                gaplessPlayback: true,
+              );
+            },
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              color: Colors.black54,
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
