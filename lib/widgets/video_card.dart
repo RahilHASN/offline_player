@@ -5,14 +5,24 @@ import 'package:flutter/material.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/video_item.dart';
+import '../services/app_settings.dart';
+import '../services/library_store.dart';
 import '../services/preview_controller.dart';
 import '../services/thumbnail_service.dart';
 import '../utils/format.dart';
 
+enum VideoAction { play, favorite, tags, rename, copy, cut }
+
 class VideoCard extends StatefulWidget {
   final VideoItem item;
   final VoidCallback onOpen;
-  const VideoCard({super.key, required this.item, required this.onOpen});
+  final void Function(VideoAction) onAction;
+  const VideoCard({
+    super.key,
+    required this.item,
+    required this.onOpen,
+    required this.onAction,
+  });
 
   @override
   State<VideoCard> createState() => _VideoCardState();
@@ -23,6 +33,8 @@ class _VideoCardState extends State<VideoCard> {
   File? _thumb;
   Duration? _duration;
   Timer? _hoverTimer;
+  final GlobalKey<PopupMenuButtonState<VideoAction>> _menuKey =
+      GlobalKey<PopupMenuButtonState<VideoAction>>();
 
   bool get _isWindows => Platform.isWindows;
   bool get _isAndroid => Platform.isAndroid;
@@ -85,9 +97,24 @@ class _VideoCardState extends State<VideoCard> {
 
   @override
   Widget build(BuildContext context) {
+    final settings = AppSettings.instance;
+    final store = LibraryStore.instance;
+    return ListenableBuilder(
+      listenable: Listenable.merge([settings, store]),
+      builder: (context, _) => _buildCard(settings, store),
+    );
+  }
+
+  Widget _buildCard(AppSettings settings, LibraryStore store) {
     final item = widget.item;
     final shownDuration =
         _duration ?? ThumbnailService.instance.durations[item.id] ?? item.duration;
+    final fav = store.isFav(item.path);
+    final tags = store.tagsFor(item.path);
+    final sub = StringBuffer(formatSize(item.sizeBytes));
+    if (tags.isNotEmpty) {
+      sub.write('  ·  ${tags.map((t) => '#$t').join(' ')}');
+    }
 
     Widget card = Card(
       clipBehavior: Clip.antiAlias,
@@ -116,44 +143,62 @@ class _VideoCardState extends State<VideoCard> {
                     gaplessPlayback: true,
                     errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                   ),
-                Positioned.fill(
-                  child: ValueListenableBuilder<PreviewState>(
-                    valueListenable: PreviewController.instance.state,
-                    builder: (context, s, _) {
-                      if (s.id != item.id || s.video == null) {
-                        return const SizedBox.shrink();
-                      }
-                      return IgnorePointer(
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            AnimatedOpacity(
-                              opacity: s.ready ? 1 : 0,
-                              duration: const Duration(milliseconds: 150),
-                              child: Video(
-                                controller: s.video!,
-                                controls: NoVideoControls,
-                                fit: BoxFit.cover,
-                                fill: Colors.black,
+                if (!settings.largePreview)
+                  Positioned.fill(
+                    child: ValueListenableBuilder<PreviewState>(
+                      valueListenable: PreviewController.instance.state,
+                      builder: (context, s, _) {
+                        if (s.id != item.id || s.video == null) {
+                          return const SizedBox.shrink();
+                        }
+                        return IgnorePointer(
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              AnimatedOpacity(
+                                opacity: s.ready ? 1 : 0,
+                                duration: const Duration(milliseconds: 150),
+                                child: Video(
+                                  controller: s.video!,
+                                  controls: NoVideoControls,
+                                  fit: BoxFit.cover,
+                                  fill: Colors.black,
+                                ),
                               ),
-                            ),
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              child: _CutBar(cut: s.cut, total: s.total),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                child: CutBar(cut: s.cut, total: s.total),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                ),
                 Positioned(
                   left: 6,
                   top: 6,
                   child: _Badge(text: item.source.label),
                 ),
+                if (item.path.isNotEmpty)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => store.toggleFav(item.path),
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Icon(
+                          fav ? Icons.favorite : Icons.favorite_border,
+                          size: 20,
+                          color: fav ? Colors.redAccent : Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ),
                 Positioned(
                   right: 6,
                   bottom: 8,
@@ -164,20 +209,69 @@ class _VideoCardState extends State<VideoCard> {
           ),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
+              padding: const EdgeInsets.only(left: 8, top: 6, bottom: 4),
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    item.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          item.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        const Spacer(),
+                        Text(
+                          sub.toString(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.white54),
+                        ),
+                      ],
+                    ),
                   ),
-                  const Spacer(),
-                  Text(
-                    formatSize(item.sizeBytes),
-                    style: const TextStyle(fontSize: 12, color: Colors.white54),
+                  PopupMenuButton<VideoAction>(
+                    key: _menuKey,
+                    tooltip: 'More',
+                    onSelected: widget.onAction,
+                    itemBuilder: (context) => [
+                      const PopupMenuItem(
+                        value: VideoAction.play,
+                        child: Text('Play'),
+                      ),
+                      PopupMenuItem(
+                        value: VideoAction.favorite,
+                        child: Text(fav
+                            ? 'Remove from favorites'
+                            : 'Add to favorites'),
+                      ),
+                      const PopupMenuItem(
+                        value: VideoAction.tags,
+                        child: Text('Tags...'),
+                      ),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
+                        value: VideoAction.rename,
+                        child: Text('Rename'),
+                      ),
+                      const PopupMenuItem(
+                        value: VideoAction.copy,
+                        child: Text('Copy'),
+                      ),
+                      const PopupMenuItem(
+                        value: VideoAction.cut,
+                        child: Text('Cut'),
+                      ),
+                    ],
+                    child: const SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: Icon(Icons.more_vert, size: 20),
+                    ),
                   ),
                 ],
               ),
@@ -189,6 +283,9 @@ class _VideoCardState extends State<VideoCard> {
 
     card = GestureDetector(
       onTap: _open,
+      onSecondaryTap: _isWindows
+          ? () => _menuKey.currentState?.showButtonMenu()
+          : null,
       onLongPressStart: _isAndroid ? (_) => _startPreview() : null,
       onLongPressEnd: _isAndroid ? (_) => _stopPreview() : null,
       onLongPressCancel: _isAndroid ? _stopPreview : null,
@@ -209,10 +306,10 @@ class _VideoCardState extends State<VideoCard> {
   }
 }
 
-class _CutBar extends StatelessWidget {
+class CutBar extends StatelessWidget {
   final int cut;
   final int total;
-  const _CutBar({required this.cut, required this.total});
+  const CutBar({super.key, required this.cut, required this.total});
 
   @override
   Widget build(BuildContext context) {
