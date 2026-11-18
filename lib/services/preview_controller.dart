@@ -10,6 +10,7 @@ import 'app_settings.dart';
 
 class PreviewState {
   final String? id;
+  final String name;
   final int cut;
   final int total;
   final bool ready;
@@ -17,6 +18,7 @@ class PreviewState {
 
   const PreviewState({
     this.id,
+    this.name = '',
     this.cut = 0,
     this.total = 0,
     this.ready = false,
@@ -26,6 +28,7 @@ class PreviewState {
   PreviewState copyWith({int? cut, int? total, bool? ready}) {
     return PreviewState(
       id: id,
+      name: name,
       cut: cut ?? this.cut,
       total: total ?? this.total,
       ready: ready ?? this.ready,
@@ -81,7 +84,7 @@ class PreviewController {
     final p = Player();
     final v = VideoController(p);
     _player = p;
-    state.value = PreviewState(id: item.id, video: v);
+    state.value = PreviewState(id: item.id, name: item.name, video: v);
 
     try {
       await p.setVolume(settings.previewAudio ? 100 : 0);
