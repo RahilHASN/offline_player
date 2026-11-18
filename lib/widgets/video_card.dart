@@ -11,7 +11,7 @@ import '../services/preview_controller.dart';
 import '../services/thumbnail_service.dart';
 import '../utils/format.dart';
 
-enum VideoAction { play, favorite, tags, rename, copy, cut }
+enum VideoAction { play, favorite, tags, rename, copyTo, moveTo }
 
 class VideoCard extends StatefulWidget {
   final VideoItem item;
@@ -29,6 +29,8 @@ class VideoCard extends StatefulWidget {
 }
 
 class _VideoCardState extends State<VideoCard> {
+  static const _hoverDelay = Duration(milliseconds: 700);
+
   ThumbHandle? _handle;
   File? _thumb;
   Duration? _duration;
@@ -116,97 +118,111 @@ class _VideoCardState extends State<VideoCard> {
       sub.write('  ·  ${tags.map((t) => '#$t').join(' ')}');
     }
 
+    Widget thumbnail = AspectRatio(
+      aspectRatio: 16 / 9,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Container(
+            color: const Color(0xFF1E1E2A),
+            child: const Icon(
+              Icons.movie_outlined,
+              size: 36,
+              color: Colors.white24,
+            ),
+          ),
+          if (_thumb != null)
+            Image.file(
+              _thumb!,
+              fit: BoxFit.cover,
+              cacheWidth: 480,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            ),
+          if (!settings.largePreview)
+            Positioned.fill(
+              child: ValueListenableBuilder<PreviewState>(
+                valueListenable: PreviewController.instance.state,
+                builder: (context, s, _) {
+                  if (s.id != item.id || s.video == null) {
+                    return const SizedBox.shrink();
+                  }
+                  return IgnorePointer(
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        AnimatedOpacity(
+                          opacity: s.ready ? 1 : 0,
+                          duration: const Duration(milliseconds: 150),
+                          child: Video(
+                            controller: s.video!,
+                            controls: NoVideoControls,
+                            fit: s.aspect < 1 ? BoxFit.contain : BoxFit.cover,
+                            fill: Colors.black,
+                          ),
+                        ),
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: PreviewBar(state: s),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          Positioned(
+            left: 6,
+            top: 6,
+            child: _Badge(text: item.source.label),
+          ),
+          if (item.path.isNotEmpty)
+            Positioned(
+              right: 0,
+              top: 0,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => store.toggleFav(item.path),
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Icon(
+                    fav ? Icons.favorite : Icons.favorite_border,
+                    size: 20,
+                    color: fav ? Colors.redAccent : Colors.white70,
+                  ),
+                ),
+              ),
+            ),
+          Positioned(
+            right: 6,
+            bottom: 8,
+            child: _Badge(text: formatDuration(shownDuration)),
+          ),
+        ],
+      ),
+    );
+
+    // Windows: hover works on the picture only, so the ⋮ button stays usable.
+    if (_isWindows) {
+      thumbnail = MouseRegion(
+        onEnter: (_) {
+          _hoverTimer?.cancel();
+          _hoverTimer = Timer(_hoverDelay, _startPreview);
+        },
+        onExit: (_) => _stopPreview(),
+        child: thumbnail,
+      );
+    }
+
     Widget card = Card(
       clipBehavior: Clip.antiAlias,
       margin: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          AspectRatio(
-            aspectRatio: 16 / 9,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Container(
-                  color: const Color(0xFF1E1E2A),
-                  child: const Icon(
-                    Icons.movie_outlined,
-                    size: 36,
-                    color: Colors.white24,
-                  ),
-                ),
-                if (_thumb != null)
-                  Image.file(
-                    _thumb!,
-                    fit: BoxFit.cover,
-                    cacheWidth: 480,
-                    gaplessPlayback: true,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                  ),
-                if (!settings.largePreview)
-                  Positioned.fill(
-                    child: ValueListenableBuilder<PreviewState>(
-                      valueListenable: PreviewController.instance.state,
-                      builder: (context, s, _) {
-                        if (s.id != item.id || s.video == null) {
-                          return const SizedBox.shrink();
-                        }
-                        return IgnorePointer(
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              AnimatedOpacity(
-                                opacity: s.ready ? 1 : 0,
-                                duration: const Duration(milliseconds: 150),
-                                child: Video(
-                                  controller: s.video!,
-                                  controls: NoVideoControls,
-                                  fit: BoxFit.cover,
-                                  fill: Colors.black,
-                                ),
-                              ),
-                              Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 0,
-                                child: CutBar(cut: s.cut, total: s.total),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                Positioned(
-                  left: 6,
-                  top: 6,
-                  child: _Badge(text: item.source.label),
-                ),
-                if (item.path.isNotEmpty)
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => store.toggleFav(item.path),
-                      child: Padding(
-                        padding: const EdgeInsets.all(6),
-                        child: Icon(
-                          fav ? Icons.favorite : Icons.favorite_border,
-                          size: 20,
-                          color: fav ? Colors.redAccent : Colors.white70,
-                        ),
-                      ),
-                    ),
-                  ),
-                Positioned(
-                  right: 6,
-                  bottom: 8,
-                  child: _Badge(text: formatDuration(shownDuration)),
-                ),
-              ],
-            ),
-          ),
+          thumbnail,
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(left: 8, top: 6, bottom: 4),
@@ -237,6 +253,7 @@ class _VideoCardState extends State<VideoCard> {
                   PopupMenuButton<VideoAction>(
                     key: _menuKey,
                     tooltip: 'More',
+                    onOpened: _stopPreview,
                     onSelected: widget.onAction,
                     itemBuilder: (context) => [
                       const PopupMenuItem(
@@ -259,12 +276,12 @@ class _VideoCardState extends State<VideoCard> {
                         child: Text('Rename'),
                       ),
                       const PopupMenuItem(
-                        value: VideoAction.copy,
-                        child: Text('Copy'),
+                        value: VideoAction.moveTo,
+                        child: Text('Move to...'),
                       ),
                       const PopupMenuItem(
-                        value: VideoAction.cut,
-                        child: Text('Cut'),
+                        value: VideoAction.copyTo,
+                        child: Text('Copy to...'),
                       ),
                     ],
                     child: const SizedBox(
@@ -292,41 +309,76 @@ class _VideoCardState extends State<VideoCard> {
       child: card,
     );
 
-    if (_isWindows) {
-      card = MouseRegion(
-        onEnter: (_) {
-          _hoverTimer?.cancel();
-          _hoverTimer = Timer(const Duration(milliseconds: 250), _startPreview);
-        },
-        onExit: (_) => _stopPreview(),
-        child: card,
-      );
-    }
     return card;
   }
 }
 
-class CutBar extends StatelessWidget {
-  final int cut;
-  final int total;
-  const CutBar({super.key, required this.cut, required this.total});
+/// Animates smoothly across the whole preview. Restarts on every cut.
+class PreviewProgress extends StatelessWidget {
+  final PreviewState state;
+  final Widget Function(BuildContext context, double value) builder;
+  const PreviewProgress({
+    super.key,
+    required this.state,
+    required this.builder,
+  });
 
   @override
   Widget build(BuildContext context) {
-    if (total <= 0) return const SizedBox(height: 3);
-    final color = Theme.of(context).colorScheme.primary;
-    return SizedBox(
-      height: 3,
-      child: Row(
-        children: [
-          for (var i = 0; i < total; i++)
-            Expanded(
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 1),
-                color: i <= cut ? color : Colors.white30,
-              ),
-            ),
-        ],
+    final total = state.total;
+    if (total <= 0) return builder(context, 0);
+    final from = state.cut / total;
+    final to = (state.cut + 1) / total;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey<int>(state.seq),
+      tween: Tween<double>(begin: from, end: to),
+      duration: Duration(milliseconds: state.clipMs < 1 ? 1 : state.clipMs),
+      curve: Curves.linear,
+      builder: (context, v, _) => builder(context, v),
+    );
+  }
+}
+
+/// Thin smooth bar along the bottom of the preview.
+class PreviewBar extends StatelessWidget {
+  final PreviewState state;
+  const PreviewBar({super.key, required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    return PreviewProgress(
+      state: state,
+      builder: (context, v) => LinearProgressIndicator(
+        value: v,
+        minHeight: 3,
+        backgroundColor: Colors.white24,
+      ),
+    );
+  }
+}
+
+/// Small circle for the top-right corner of the large preview.
+class PreviewRing extends StatelessWidget {
+  final PreviewState state;
+  const PreviewRing({super.key, required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 32,
+      height: 32,
+      padding: const EdgeInsets.all(5),
+      decoration: const BoxDecoration(
+        color: Colors.black54,
+        shape: BoxShape.circle,
+      ),
+      child: PreviewProgress(
+        state: state,
+        builder: (context, v) => CircularProgressIndicator(
+          value: v,
+          strokeWidth: 3,
+          backgroundColor: Colors.white24,
+        ),
       ),
     );
   }
