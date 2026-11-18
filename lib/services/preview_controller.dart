@@ -15,6 +15,9 @@ class PreviewState {
   final int total;
   final bool ready;
   final VideoController? video;
+  final double aspect; // width / height
+  final int clipMs; // length of the current cut
+  final int seq; // changes every cut, restarts the progress animation
 
   const PreviewState({
     this.id,
@@ -23,9 +26,19 @@ class PreviewState {
     this.total = 0,
     this.ready = false,
     this.video,
+    this.aspect = 16 / 9,
+    this.clipMs = 1500,
+    this.seq = 0,
   });
 
-  PreviewState copyWith({int? cut, int? total, bool? ready}) {
+  PreviewState copyWith({
+    int? cut,
+    int? total,
+    bool? ready,
+    double? aspect,
+    int? clipMs,
+    int? seq,
+  }) {
     return PreviewState(
       id: id,
       name: name,
@@ -33,6 +46,9 @@ class PreviewState {
       total: total ?? this.total,
       ready: ready ?? this.ready,
       video: video,
+      aspect: aspect ?? this.aspect,
+      clipMs: clipMs ?? this.clipMs,
+      seq: seq ?? this.seq,
     );
   }
 }
@@ -75,6 +91,21 @@ class PreviewController {
     state.value = const PreviewState();
   }
 
+  /// Reads the video's shape (width / height). Falls back to 16:9.
+  Future<double> _readAspect(Player p) async {
+    try {
+      for (var i = 0; i < 20; i++) {
+        final w = p.state.width;
+        final h = p.state.height;
+        if (w != null && h != null && w > 0 && h > 0) {
+          return (w / h).clamp(0.4, 2.5).toDouble();
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    } catch (_) {}
+    return 16 / 9;
+  }
+
   Future<void> start(VideoItem item) async {
     if (item.path.isEmpty) return;
     final token = ++_token;
@@ -110,7 +141,14 @@ class PreviewController {
       if (secs < 10) {
         await p.setPlaylistMode(PlaylistMode.single);
         await p.play();
-        _set(token, (s) => s.copyWith(cut: 0, total: 1));
+        final a = await _readAspect(p);
+        if (token != _token) return;
+        final ms = max(1000, dur.inMilliseconds);
+        _set(token,
+            (s) => s.copyWith(cut: 0, total: 1, aspect: a, clipMs: ms, seq: 1));
+        _timer = Timer.periodic(Duration(milliseconds: ms), (_) {
+          _set(token, (s) => s.copyWith(seq: s.seq + 1));
+        });
         await Future<void>.delayed(const Duration(milliseconds: 300));
         _set(token, (s) => s.copyWith(ready: true));
         return;
@@ -121,6 +159,9 @@ class PreviewController {
       final clip = min(settings.clipSeconds, section * 0.8);
 
       await p.play();
+      final a = await _readAspect(p);
+      if (token != _token) return;
+      _set(token, (s) => s.copyWith(aspect: a));
       await _cut(token, p, 0, n, section, clip, true);
     } catch (_) {
       if (token == _token) stop();
@@ -145,7 +186,11 @@ class PreviewController {
     }
     if (token != _token) return;
 
-    _set(token, (s) => s.copyWith(cut: i, total: n));
+    final clipMs = max(200, (clip * 1000).round());
+    _set(
+      token,
+      (s) => s.copyWith(cut: i, total: n, clipMs: clipMs, seq: s.seq + 1),
+    );
     if (first) {
       Future<void>.delayed(const Duration(milliseconds: 300), () {
         _set(token, (s) => s.copyWith(ready: true));
@@ -154,7 +199,7 @@ class PreviewController {
 
     _timer?.cancel();
     _timer = Timer(
-      Duration(milliseconds: (clip * 1000).round()),
+      Duration(milliseconds: clipMs),
       () => _cut(token, p, (i + 1) % n, n, section, clip, false),
     );
   }
