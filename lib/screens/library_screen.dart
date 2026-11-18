@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
 
-import '../models/video_item.dart';
 import '../services/library_controller.dart';
-import '../utils/format.dart';
+import '../widgets/video_card.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -238,92 +237,13 @@ class _LibraryScreenState extends State<LibraryScreen>
               mainAxisSpacing: 8,
             ),
             itemCount: _c.items.length,
-            itemBuilder: (context, i) => _VideoCard(item: _c.items[i]),
+            itemBuilder: (context, i) {
+              final item = _c.items[i];
+              return VideoCard(key: ValueKey(item.id), item: item);
+            },
           ),
         ),
       ],
-    );
-  }
-}
-
-class _VideoCard extends StatelessWidget {
-  final VideoItem item;
-  const _VideoCard({required this.item});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      margin: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AspectRatio(
-            aspectRatio: 16 / 9,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Container(
-                  color: const Color(0xFF1E1E2A),
-                  child: const Icon(
-                    Icons.movie_outlined,
-                    size: 36,
-                    color: Colors.white24,
-                  ),
-                ),
-                Positioned(
-                  left: 6,
-                  top: 6,
-                  child: _Badge(text: item.source.label),
-                ),
-                Positioned(
-                  right: 6,
-                  bottom: 6,
-                  child: _Badge(text: formatDuration(item.duration)),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                  const Spacer(),
-                  Text(
-                    formatSize(item.sizeBytes),
-                    style: const TextStyle(fontSize: 12, color: Colors.white54),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Badge extends StatelessWidget {
-  final String text;
-  const _Badge({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: Colors.black54,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(text, style: const TextStyle(fontSize: 11)),
     );
   }
 }
