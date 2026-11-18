@@ -27,7 +27,7 @@ class OfflinePlayerApp extends StatelessWidget {
         colorSchemeSeed: Colors.indigo,
         scaffoldBackgroundColor: const Color(0xFF0F0F14),
       ),
-      home: const LibraryScreen(),
+      home: LibraryScreen(),
     );
   }
 }
