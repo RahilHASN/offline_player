@@ -31,4 +31,8 @@ class VideoItem {
     required this.date,
     required this.source,
   });
+
+  /// Identity for tags, favorites, progress and so on.
+  /// Based on size and date, so it survives a rename or move.
+  String get key => '$sizeBytes-${date.millisecondsSinceEpoch ~/ 1000}';
 }
