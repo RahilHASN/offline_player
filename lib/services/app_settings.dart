@@ -71,7 +71,7 @@ class AppSettings extends ChangeNotifier {
   /// Used by Restore.
   void fromJson(Map<String, dynamic> j) {
     _apply(j);
-    toJson().forEach(_write);
+        toJson().forEach((k, v) => _write(k, v as Object));
     notifyListeners();
   }
 
