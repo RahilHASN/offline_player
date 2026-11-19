@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import '../models/video_item.dart';
@@ -16,9 +14,14 @@ import '../services/library_controller.dart';
 import '../services/library_store.dart';
 import '../services/preview_controller.dart';
 import '../services/thumbnail_service.dart';
+import '../services/trash_service.dart';
+import '../widgets/large_preview.dart';
+import '../widgets/library_sheets.dart';
 import '../widgets/video_card.dart';
+import 'cleaner_screen.dart';
 import 'player_screen.dart';
 import 'settings_screen.dart';
+import 'trash_screen.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -38,6 +41,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   Set<String> _rootKeys = <String>{};
 
   String _source = 'all'; // all, phone, pendrive, pc
+  String _shelf = 'all'; // all, continue, recent, unwatched
+  String? _playlist;
   bool _headerVisible = true;
 
   bool _selecting = false;
@@ -76,6 +81,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _c.startWatching();
     } else if (state == AppLifecycleState.paused) {
       PreviewController.instance.stop();
+      LibraryStore.instance.lockVault();
       _c.stopWatching();
     }
   }
@@ -94,6 +100,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (!identical(_c.items, _lastItems)) {
       _lastItems = _c.items;
       ThumbnailService.instance.prefetch(_c.items);
+      LibraryStore.instance.migrate(_c.items);
     }
     if (_source == 'pendrive') {
       final has = _c.drives.any((d) => d.removable) ||
@@ -177,24 +184,57 @@ class _LibraryScreenState extends State<LibraryScreen>
   String get _tagQuery =>
       _search.text.trim().replaceAll(RegExp(r'^#+'), '').trim();
 
+  bool _shown(VideoItem v) {
+    final store = LibraryStore.instance;
+    return !store.isHidden(v.key) || store.vaultUnlocked;
+  }
+
   List<VideoItem> _visible() {
     final s = AppSettings.instance;
     final store = LibraryStore.instance;
     final raw = _search.text.trim().toLowerCase();
     final tagOnly = raw.startsWith('#');
     final tq = _tagQuery.toLowerCase();
+    final now = DateTime.now();
 
     final list = _c.items.where((v) {
+      if (!_shown(v)) return false;
       if (_source != 'all' && v.source.name != _source) return false;
+      if (_playlist != null && !store.inPlaylist(_playlist!, v.key)) {
+        return false;
+      }
+      if (_shelf == 'continue') {
+        final p = store.progressFor(v.key);
+        if (p == null || p.fraction < 0.02 || p.fraction >= 0.95) return false;
+      } else if (_shelf == 'recent') {
+        if (now.difference(v.date).inDays > 7) return false;
+      } else if (_shelf == 'unwatched') {
+        if (store.progressFor(v.key) != null) return false;
+      }
       if (tq.isNotEmpty) {
         final tagHit =
-            store.tagsFor(v.path).any((t) => t.toLowerCase().contains(tq));
+            store.tagsFor(v.key).any((t) => t.toLowerCase().contains(tq));
         final nameHit = !tagOnly && v.name.toLowerCase().contains(tq);
         if (!tagHit && !nameHit) return false;
       }
-      if (store.filtering && !store.matches(v.path)) return false;
+      if (store.filtering && !store.matches(v.key)) return false;
       return true;
     }).toList();
+
+    if (_playlist != null) {
+      final order = <String, int>{};
+      final keys = store.playlistKeys(_playlist!);
+      for (var i = 0; i < keys.length; i++) {
+        order[keys[i]] = i;
+      }
+      list.sort((a, b) => (order[a.key] ?? 0).compareTo(order[b.key] ?? 0));
+      return list;
+    }
+    if (_shelf == 'continue') {
+      list.sort((a, b) => (store.progressFor(b.key)?.ts ?? 0)
+          .compareTo(store.progressFor(a.key)?.ts ?? 0));
+      return list;
+    }
 
     Duration dur(VideoItem v) =>
         ThumbnailService.instance.durations[v.id] ??
@@ -218,7 +258,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     return list;
   }
 
-  /// The videos shown on screen right now (used by Select all).
+  /// The videos shown on screen right now (used by Select all and Play all).
   List<VideoItem> _currentVideos() {
     final list = _visible();
     if (!AppSettings.instance.viewFolders || _dir == null) return list;
@@ -270,22 +310,65 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   // ---------- actions ----------
 
-  void _openVideo(VideoItem item) {
+  void _openVideo(VideoItem item, {int? startMs}) {
     if (item.path.isEmpty) {
       _snack('This video has no readable file path.');
       return;
     }
     PreviewController.instance.stop();
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => PlayerScreen(item: item)),
-    );
+    final q = _currentVideos().where((v) => v.path.isNotEmpty).toList();
+    var i = q.indexWhere((v) => v.id == item.id);
+    if (i < 0) {
+      q.insert(0, item);
+      i = 0;
+    }
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(
+          builder: (_) => PlayerScreen(queue: q, index: i, startMs: startMs),
+        ))
+        .then((_) => LibraryStore.instance.touch());
+  }
+
+  void _playAll() {
+    final q = _currentVideos().where((v) => v.path.isNotEmpty).toList();
+    if (q.isEmpty) return;
+    PreviewController.instance.stop();
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(
+          builder: (_) => PlayerScreen(queue: q, index: 0),
+        ))
+        .then((_) => LibraryStore.instance.touch());
   }
 
   void _openSettings() {
     PreviewController.instance.stop();
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
-    );
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => const SettingsScreen()));
+  }
+
+  Future<void> _openCleaner() async {
+    PreviewController.instance.stop();
+    final items = _c.items.where(_shown).toList();
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => CleanerScreen(items: items, onChanged: _c.refresh),
+    ));
+    await _c.refresh();
+  }
+
+  Future<void> _openTrash() async {
+    PreviewController.instance.stop();
+    await Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => const TrashScreen()));
+    await _c.refresh();
+  }
+
+  Future<void> _toggleVault() async {
+    final store = LibraryStore.instance;
+    if (store.vaultUnlocked) {
+      store.lockVault();
+      return;
+    }
+    await ensureVaultUnlocked(context);
   }
 
   Future<void> _onAction(VideoItem v, VideoAction a) async {
@@ -297,15 +380,22 @@ class _LibraryScreenState extends State<LibraryScreen>
       _snack('This video has no readable file path.');
       return;
     }
+    final store = LibraryStore.instance;
     switch (a) {
       case VideoAction.play:
         _openVideo(v);
         break;
       case VideoAction.favorite:
-        LibraryStore.instance.toggleFav(v.path);
+        store.toggleFav(v.key);
         break;
       case VideoAction.tags:
-        _editTags(v);
+        showTagsSheet(context, v);
+        break;
+      case VideoAction.playlists:
+        showPlaylistsSheet(context, v);
+        break;
+      case VideoAction.bookmarks:
+        showBookmarksSheet(context, v, (ms) => _openVideo(v, startMs: ms));
         break;
       case VideoAction.rename:
         await _rename(v);
@@ -316,12 +406,28 @@ class _LibraryScreenState extends State<LibraryScreen>
       case VideoAction.copyTo:
         await _transfer(<VideoItem>[v], move: false);
         break;
+      case VideoAction.vault:
+        if (store.isHidden(v.key)) {
+          store.unhide(v.key);
+          _snack('Removed from the vault.');
+        } else {
+          if (!await ensureVaultUnlocked(context)) return;
+          store.hide(v.key);
+          store.lockVault();
+          _snack('Moved to the vault. Unlock it from the menu to see it.');
+        }
+        break;
       case VideoAction.delete:
         await _deleteItems(<VideoItem>[v]);
         break;
       case VideoAction.select:
         break;
     }
+  }
+
+  void _remap(VideoItem old, String newPath) {
+    final n = _c.items.where((x) => x.path == newPath);
+    if (n.isNotEmpty) LibraryStore.instance.remapKey(old.key, n.first.key);
   }
 
   Future<void> _rename(VideoItem v) async {
@@ -351,8 +457,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (newName == null || newName.isEmpty || newName == v.name) return;
     try {
       final np = await FileOps.rename(v.path, newName);
-      LibraryStore.instance.renamePath(v.path, np);
       await _c.refresh();
+      _remap(v, np);
     } catch (e) {
       _snack('Could not rename: $e');
     }
@@ -378,10 +484,11 @@ class _LibraryScreenState extends State<LibraryScreen>
     _snack('${move ? 'Moving' : 'Copying'} ${items.length}...');
     var ok = 0;
     var failed = 0;
+    final moved = <MapEntry<VideoItem, String>>[];
     for (final v in items) {
       try {
         final np = await FileOps.paste(v.path, dest, move: move);
-        if (move) LibraryStore.instance.renamePath(v.path, np);
+        if (move) moved.add(MapEntry(v, np));
         ok++;
       } catch (_) {
         failed++;
@@ -391,6 +498,9 @@ class _LibraryScreenState extends State<LibraryScreen>
     _snack(failed == 0 ? '$word $ok.' : '$word $ok, failed $failed.');
     if (_selecting) _endSelect();
     await _c.refresh();
+    for (final e in moved) {
+      _remap(e.key, e.value);
+    }
   }
 
   Future<void> _deleteItems(List<VideoItem> all) async {
@@ -405,12 +515,14 @@ class _LibraryScreenState extends State<LibraryScreen>
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(items.length == 1
-            ? 'Delete this video?'
-            : 'Delete ${items.length} videos?'),
+            ? 'Move this video to trash?'
+            : 'Move ${items.length} videos to trash?'),
         content: Text(
           items.length == 1
-              ? '${items.first.name}\n\nThis cannot be undone.'
-              : 'They will be deleted from the device. This cannot be undone.',
+              ? '${items.first.name}\n\nIt stays in Trash for 30 days '
+                  '(menu > Trash) and can be restored.'
+              : 'They stay in Trash for 30 days (menu > Trash) and can be '
+                  'restored.',
         ),
         actions: [
           TextButton(
@@ -419,7 +531,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete'),
+            child: const Text('Move to trash'),
           ),
         ],
       ),
@@ -429,124 +541,17 @@ class _LibraryScreenState extends State<LibraryScreen>
     var failed = 0;
     for (final v in items) {
       try {
-        await File(v.path).delete();
+        await TrashService.instance.moveToTrash(v);
         done++;
       } catch (_) {
         failed++;
       }
     }
-    _snack(failed == 0 ? 'Deleted $done.' : 'Deleted $done, failed $failed.');
+    _snack(failed == 0
+        ? 'Moved $done to trash.'
+        : 'Moved $done to trash, failed $failed.');
     if (_selecting) _endSelect();
     await _c.refresh();
-  }
-
-  /// Tags for one video: search, create, tick. Every tap is saved at once.
-  void _editTags(VideoItem v) {
-    final store = LibraryStore.instance;
-    final ctrl = TextEditingController();
-
-    void create() {
-      final n = store.createTag(ctrl.text);
-      if (n != null) {
-        store.setTags(v.path, <String>{...store.tagsFor(v.path), n});
-        ctrl.clear();
-      }
-    }
-
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) => ListenableBuilder(
-        listenable: Listenable.merge([store, ctrl]),
-        builder: (ctx, _) {
-          final q = ctrl.text.trim().replaceAll(RegExp(r'^#+'), '').trim();
-          final cur = store.tagsFor(v.path);
-          final shown = store.tags
-              .where((t) =>
-                  q.isEmpty || t.toLowerCase().contains(q.toLowerCase()))
-              .toList();
-          final exists =
-              store.tags.any((t) => t.toLowerCase() == q.toLowerCase());
-          return Padding(
-            padding: EdgeInsets.fromLTRB(
-                16, 0, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  v.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: ctrl,
-                  autofocus: true,
-                  textInputAction: TextInputAction.done,
-                  decoration: const InputDecoration(
-                    prefixIcon: Icon(Icons.search),
-                    hintText: 'Search or create a tag',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  onSubmitted: (_) => create(),
-                ),
-                if (q.isNotEmpty && !exists)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.add_circle_outline),
-                    title: Text('Create "$q" and add it to this video'),
-                    onTap: create,
-                  ),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 280),
-                  child: ListView(
-                    shrinkWrap: true,
-                    children: [
-                      if (store.tags.isEmpty && q.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 12),
-                          child: Text(
-                            'No tags yet. Type a name above to create one.',
-                            style: TextStyle(color: Colors.white54),
-                          ),
-                        ),
-                      for (final t in shown)
-                        CheckboxListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          value: cur.contains(t),
-                          title: Text(t),
-                          onChanged: (b) {
-                            final next = <String>{...store.tagsFor(v.path)};
-                            if (b == true) {
-                              next.add(t);
-                            } else {
-                              next.remove(t);
-                            }
-                            store.setTags(v.path, next);
-                          },
-                        ),
-                    ],
-                  ),
-                ),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('Done'),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
   }
 
   Future<void> _confirmDeleteTag(String t) async {
@@ -570,219 +575,13 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (ok == true) LibraryStore.instance.deleteTag(t);
   }
 
-  void _showViewOptions() {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) => ListenableBuilder(
-        listenable: AppSettings.instance,
-        builder: (ctx, _) {
-          final s = AppSettings.instance;
-          const heading = TextStyle(fontSize: 13, color: Colors.white54);
-          return SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Show', style: heading),
-                  const SizedBox(height: 6),
-                  SegmentedButton<bool>(
-                    segments: const [
-                      ButtonSegment(
-                        value: false,
-                        label: Text('All files'),
-                        icon: Icon(Icons.grid_view),
-                      ),
-                      ButtonSegment(
-                        value: true,
-                        label: Text('Folders'),
-                        icon: Icon(Icons.folder),
-                      ),
-                    ],
-                    selected: {s.viewFolders},
-                    onSelectionChanged: (v) {
-                      s.setViewFolders(v.first);
-                      setState(() => _dir = null);
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('Columns', style: heading),
-                  const SizedBox(height: 6),
-                  SegmentedButton<int>(
-                    segments: const [
-                      ButtonSegment(value: 0, label: Text('Auto')),
-                      ButtonSegment(value: 1, label: Text('1')),
-                      ButtonSegment(value: 2, label: Text('2')),
-                      ButtonSegment(value: 3, label: Text('3')),
-                    ],
-                    selected: {s.columns},
-                    onSelectionChanged: (v) => s.setColumns(v.first),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('Sort by', style: heading),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      for (final e in const {
-                        'name': 'Name',
-                        'date': 'Date',
-                        'length': 'Length',
-                        'size': 'Size',
-                      }.entries)
-                        ChoiceChip(
-                          label: Text(e.value),
-                          selected: s.sortKey == e.key,
-                          onSelected: (_) => s.setSort(
-                            e.key,
-                            s.sortKey == e.key ? s.sortAsc : e.key == 'name',
-                          ),
-                        ),
-                      ActionChip(
-                        avatar: Icon(
-                          s.sortAsc
-                              ? Icons.arrow_upward
-                              : Icons.arrow_downward,
-                          size: 16,
-                        ),
-                        label: Text(s.sortAsc ? 'Ascending' : 'Descending'),
-                        onPressed: () => s.setSort(s.sortKey, !s.sortAsc),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Large preview window'),
-                    subtitle: const Text(
-                        'Show the preview in a big window instead of on the card'),
-                    value: s.largePreview,
-                    onChanged: s.setLargePreview,
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _showSources() {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => ListenableBuilder(
-        listenable: _c,
-        builder: (ctx, _) {
-          final titleStyle = Theme.of(ctx).textTheme.titleSmall;
-          return AlertDialog(
-            title: const Text('Sources'),
-            content: SizedBox(
-              width: 420,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (_c.isAndroid && !_c.allFilesAccess) ...[
-                      const Text(
-                        'To read pendrives and extra folders, allow '
-                        '"All files access" for this app. A settings page '
-                        'will open: switch it on, then come back.',
-                      ),
-                      const SizedBox(height: 8),
-                      FilledButton(
-                        onPressed: _c.requestAllFilesAccess,
-                        child: const Text('Allow all files access'),
-                      ),
-                      const SizedBox(height: 16),
-                    ],
-                    if (_c.canScanFiles) ...[
-                      Text('Detected drives', style: titleStyle),
-                      if (_c.drives.isEmpty)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          child: Text(
-                            _c.isAndroid
-                                ? 'No pendrive detected. Plug it in, then tap Rescan. '
-                                    'If it still does not show, use "Add folder".'
-                                : 'No drives found.',
-                            style: const TextStyle(color: Colors.white54),
-                          ),
-                        ),
-                      for (final d in _c.drives)
-                        ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          leading:
-                              Icon(d.removable ? Icons.usb : Icons.storage),
-                          title: Text(d.root),
-                          subtitle:
-                              Text(d.removable ? 'Removable' : 'Fixed drive'),
-                          trailing: _c.isAndroid
-                              ? const Text('Auto-scanned',
-                                  style: TextStyle(fontSize: 12))
-                              : (_c.folders.contains(d.root)
-                                  ? const Icon(Icons.check)
-                                  : TextButton(
-                                      onPressed: () => _c.addPath(d.root),
-                                      child: const Text('Add'),
-                                    )),
-                        ),
-                      const SizedBox(height: 12),
-                      Text('Folders', style: titleStyle),
-                      if (_c.folders.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 8),
-                          child: Text('No folders added.',
-                              style: TextStyle(color: Colors.white54)),
-                        ),
-                      for (final f in _c.folders)
-                        ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(f, overflow: TextOverflow.ellipsis),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () => _c.removeFolder(f),
-                          ),
-                        ),
-                    ],
-                    if (_c.notice != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          _c.notice!,
-                          style: const TextStyle(color: Colors.orangeAccent),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              if (_c.canScanFiles)
-                TextButton(
-                  onPressed: _c.addFolder,
-                  child: const Text('Add folder'),
-                ),
-              TextButton(
-                onPressed: _c.loading ? null : _c.refresh,
-                child: const Text('Rescan'),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Close'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
+  Future<void> _pickPlaylist() async {
+    final r = await showPlaylistList(context);
+    if (r == null || !mounted) return;
+    setState(() {
+      _playlist = r.isEmpty ? null : r;
+      _dir = null;
+    });
   }
 
   // ---------- build ----------
@@ -843,7 +642,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                       Expanded(child: _body(list)),
                     ],
                   ),
-                  Positioned.fill(child: _largePreview()),
+                  const Positioned.fill(child: LargePreview()),
                 ],
               ),
             ),
@@ -917,27 +716,47 @@ class _LibraryScreenState extends State<LibraryScreen>
                 });
               },
             ),
+            if (store.vaultUnlocked)
+              _btn(Icons.lock_open, 'Lock vault', store.lockVault,
+                  color: Colors.amber),
             _btn(
               store.favoritesOnly ? Icons.favorite : Icons.favorite_border,
               'Favorites only',
               () => store.setFavoritesOnly(!store.favoritesOnly),
               color: store.favoritesOnly ? Colors.redAccent : null,
             ),
-            _btn(Icons.tune, 'View options', _showViewOptions),
+            _btn(
+              Icons.tune,
+              'View options',
+              () => showViewOptions(
+                context,
+                onFoldersChanged: () => setState(() => _dir = null),
+              ),
+            ),
             PopupMenuButton<String>(
               iconSize: 22,
               padding: const EdgeInsets.all(9),
               onSelected: (v) {
                 if (v == 'select') _startSelect();
-                if (v == 'sources') _showSources();
+                if (v == 'cleaner') _openCleaner();
+                if (v == 'trash') _openTrash();
+                if (v == 'vault') _toggleVault();
+                if (v == 'sources') showSourcesDialog(context, _c);
                 if (v == 'settings') _openSettings();
                 if (v == 'rescan') _c.refresh();
               },
-              itemBuilder: (context) => const [
-                PopupMenuItem(value: 'select', child: Text('Select')),
-                PopupMenuItem(value: 'sources', child: Text('Sources')),
-                PopupMenuItem(value: 'rescan', child: Text('Rescan')),
-                PopupMenuItem(value: 'settings', child: Text('Settings')),
+              itemBuilder: (context) => [
+                const PopupMenuItem(value: 'select', child: Text('Select')),
+                PopupMenuItem(
+                  value: 'vault',
+                  child: Text(store.vaultUnlocked ? 'Lock vault' : 'Vault'),
+                ),
+                const PopupMenuItem(
+                    value: 'cleaner', child: Text('Storage cleaner')),
+                const PopupMenuItem(value: 'trash', child: Text('Trash')),
+                const PopupMenuItem(value: 'sources', child: Text('Sources')),
+                const PopupMenuItem(value: 'rescan', child: Text('Rescan')),
+                const PopupMenuItem(value: 'settings', child: Text('Settings')),
               ],
             ),
           ],
@@ -979,7 +798,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  /// All / Phone / USB chips and the folder-view switch.
+  /// All / Phone / USB chips, shelves, playlists and the folder-view switch.
   Widget _sourceRow(bool land) {
     final s = AppSettings.instance;
     final hasUsb = _c.drives.any((d) => d.removable) ||
@@ -992,9 +811,23 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (hasUsb) 'pendrive': 'USB',
     };
 
+    final visibleItems = _c.items.where(_shown).toList();
     int countOf(String key) => key == 'all'
-        ? _c.items.length
-        : _c.items.where((v) => v.source.name == key).length;
+        ? visibleItems.length
+        : visibleItems.where((v) => v.source.name == key).length;
+
+    Widget shelf(String key, String label) => Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            label: Text(label, style: const TextStyle(fontSize: 12)),
+            selected: _shelf == key,
+            onSelected: (_) => setState(() {
+              _shelf = _shelf == key ? 'all' : key;
+              _dir = null;
+            }),
+          ),
+        );
 
     return SizedBox(
       height: land ? 38 : 46,
@@ -1019,6 +852,20 @@ class _LibraryScreenState extends State<LibraryScreen>
                       }),
                     ),
                   ),
+                const SizedBox(width: 4),
+                shelf('continue', 'Continue'),
+                shelf('recent', 'Recent'),
+                shelf('unwatched', 'Unwatched'),
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    avatar: const Icon(Icons.queue_music, size: 16),
+                    label: Text(_playlist ?? 'Playlists',
+                        style: const TextStyle(fontSize: 12)),
+                    onPressed: _pickPlaylist,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1112,13 +959,31 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   Widget _filterBar() {
     final store = LibraryStore.instance;
-    if (!store.filtering) return const SizedBox.shrink();
+    if (!store.filtering && _playlist == null) return const SizedBox.shrink();
     return SizedBox(
       height: 44,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         children: [
+          if (_playlist != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Chip(
+                avatar: const Icon(Icons.queue_music, size: 16),
+                label: Text(_playlist!),
+                onDeleted: () => setState(() => _playlist = null),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: ActionChip(
+                avatar: const Icon(Icons.play_arrow, size: 18),
+                label: const Text('Play all'),
+                onPressed: _playAll,
+              ),
+            ),
+          ],
           if (store.favoritesOnly)
             Padding(
               padding: const EdgeInsets.only(right: 6),
@@ -1137,99 +1002,13 @@ class _LibraryScreenState extends State<LibraryScreen>
                 onDeleted: () => store.toggleSelected(t),
               ),
             ),
-          TextButton(
-            onPressed: store.clearFilters,
-            child: const Text('Clear'),
-          ),
+          if (store.filtering)
+            TextButton(
+              onPressed: store.clearFilters,
+              child: const Text('Clear'),
+            ),
         ],
       ),
-    );
-  }
-
-  Widget _largePreview() {
-    return ValueListenableBuilder<PreviewState>(
-      valueListenable: PreviewController.instance.state,
-      builder: (context, s, _) {
-        if (!AppSettings.instance.largePreview || s.video == null) {
-          return const SizedBox.shrink();
-        }
-        final size = MediaQuery.sizeOf(context);
-        final maxW = min(size.width * 0.94, 780.0);
-        final maxH = size.height * 0.72;
-        var pw = maxW;
-        var ph = pw / s.aspect;
-        if (ph > maxH) {
-          ph = maxH;
-          pw = ph * s.aspect;
-        }
-        return IgnorePointer(
-          child: Container(
-            color: Colors.black54,
-            alignment: Alignment.center,
-            child: SizedBox(
-              width: pw,
-              height: ph,
-              child: Container(
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (!s.ready)
-                      const Center(
-                        child: SizedBox(
-                          width: 28,
-                          height: 28,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      ),
-                    AnimatedOpacity(
-                      opacity: s.ready ? 1 : 0,
-                      duration: const Duration(milliseconds: 150),
-                      child: Video(
-                        controller: s.video!,
-                        controls: NoVideoControls,
-                        fit: BoxFit.contain,
-                        fill: Colors.black,
-                      ),
-                    ),
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      top: 0,
-                      child: Container(
-                        padding: const EdgeInsets.fromLTRB(10, 5, 46, 5),
-                        color: Colors.black45,
-                        child: Text(
-                          s.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 11),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      right: 8,
-                      top: 4,
-                      child: PreviewRing(state: s),
-                    ),
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: PreviewBar(state: s),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 
@@ -1262,7 +1041,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         buttonLabel: 'Add folder',
         onPressed: _c.addFolder,
         secondaryLabel: 'Show drives',
-        onSecondary: _showSources,
+        onSecondary: () => showSourcesDialog(context, _c),
       );
     }
     if (_c.items.isEmpty) {
