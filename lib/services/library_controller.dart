@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/video_item.dart';
 import 'folder_tree.dart';
+import 'library_index.dart';
 import 'scanner_android.dart';
 import 'scanner_desktop.dart';
 import 'storage_volumes.dart';
@@ -53,6 +54,13 @@ class LibraryController extends ChangeNotifier {
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     folders = prefs.getStringList('folders') ?? <String>[];
+
+    // show the last list straight away, then update it
+    final cached = await LibraryIndex.load();
+    if (cached.isNotEmpty) {
+      items = cached;
+      notifyListeners();
+    }
     await refresh();
   }
 
@@ -141,8 +149,11 @@ class LibraryController extends ChangeNotifier {
         };
 
         for (final v in r.items) {
-          // with full file access, entries whose file is gone are stale
-          if (v.path.isEmpty && allFilesAccess) continue;
+          if (allFilesAccess) {
+            // with full file access, entries whose file is gone are stale
+            if (v.path.isEmpty) continue;
+            if (!File(v.path).existsSync()) continue;
+          }
           result[v.id] = v;
         }
         for (final v in fileItems) {
@@ -166,6 +177,7 @@ class LibraryController extends ChangeNotifier {
       list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       items = list;
       unresolved = list.where((v) => v.path.isEmpty).length;
+      LibraryIndex.save(list);
     } catch (e) {
       error = e.toString();
     }
