@@ -37,10 +37,129 @@ jobs:
           find android -name AndroidManifest.xml -exec sed -i '/android.permission.INTERNET/d' {} +
           sed -i 's/android:label="[^"]*"/android:label="Offline Player"/' "$M"
           sed -i 's#<manifest#<manifest xmlns:tools="http://schemas.android.com/tools" #' "$M"
-          sed -i 's#<application#<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />\n    <application#' "$M"
+          sed -i 's#<application#<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />\n    <application#' "$M"
           grep -q "READ_MEDIA_VIDEO" "$M" || { echo "Manifest edit failed"; exit 1; }
           grep -q "MANAGE_EXTERNAL_STORAGE" "$M" || { echo "Manifest edit failed"; exit 1; }
           grep -q 'tools:node="remove"' "$M" || { echo "Manifest edit failed"; exit 1; }
+
+      - name: Add native helpers (picture-in-picture, background play)
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          MA=$(find android/app/src/main -name MainActivity.kt | head -n 1)
+          [ -n "$MA" ] || { echo "MainActivity.kt not found"; exit 1; }
+          DIR=$(dirname "$MA")
+          PKG=$(grep -m1 '^package ' "$MA" | sed 's/^package //' | tr -d '\r ')
+          echo "Package: $PKG"
+
+          cat > "$MA" <<KT
+          package $PKG
+
+          import android.app.PictureInPictureParams
+          import android.content.Intent
+          import android.os.Build
+          import android.util.Rational
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "offline/native")
+                      .setMethodCallHandler { call, result ->
+                          when (call.method) {
+                              "pip" -> {
+                                  var ok = false
+                                  try {
+                                      if (Build.VERSION.SDK_INT >= 26) {
+                                          val params = PictureInPictureParams.Builder()
+                                              .setAspectRatio(Rational(16, 9))
+                                              .build()
+                                          ok = enterPictureInPictureMode(params)
+                                      }
+                                  } catch (e: Exception) {
+                                      ok = false
+                                  }
+                                  result.success(ok)
+                              }
+                              "keepAlive" -> {
+                                  try {
+                                      val i = Intent(this, KeepAliveService::class.java)
+                                      if (Build.VERSION.SDK_INT >= 26) {
+                                          startForegroundService(i)
+                                      } else {
+                                          startService(i)
+                                      }
+                                  } catch (e: Exception) {
+                                  }
+                                  result.success(true)
+                              }
+                              "release" -> {
+                                  try {
+                                      stopService(Intent(this, KeepAliveService::class.java))
+                                  } catch (e: Exception) {
+                                  }
+                                  result.success(true)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+          }
+          KT
+
+          cat > "$DIR/KeepAliveService.kt" <<KT
+          package $PKG
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.IBinder
+
+          class KeepAliveService : Service() {
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val channelId = "offline_player_playback"
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      val nm = getSystemService(NotificationManager::class.java)
+                      nm.createNotificationChannel(
+                          NotificationChannel(channelId, "Playback", NotificationManager.IMPORTANCE_LOW)
+                      )
+                  }
+                  val builder = if (Build.VERSION.SDK_INT >= 26) {
+                      Notification.Builder(this, channelId)
+                  } else {
+                      Notification.Builder(this)
+                  }
+                  val n = builder
+                      .setContentTitle("Offline Player")
+                      .setContentText("Playing in background")
+                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      .setOngoing(true)
+                      .build()
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                      } else {
+                          startForeground(1, n)
+                      }
+                  } catch (e: Exception) {
+                      stopSelf()
+                  }
+                  return START_NOT_STICKY
+              }
+          }
+          KT
+
+          sed -i '0,/<activity/s//<activity android:supportsPictureInPicture="true"/' "$M"
+          sed -i "s#</application>#    <service android:name=\"$PKG.KeepAliveService\" android:foregroundServiceType=\"mediaPlayback\" android:exported=\"false\" />\n    </application>#" "$M"
+          grep -q "supportsPictureInPicture" "$M" || { echo "PiP manifest edit failed"; exit 1; }
+          grep -q "KeepAliveService" "$M" || { echo "Service manifest edit failed"; exit 1; }
           cat "$M"
 
       - name: Force compileSdk 36 for all plugins
@@ -72,7 +191,6 @@ jobs:
           }
           EOF
             echo "Patched build.gradle.kts"
-            tail -n 30 android/build.gradle.kts
           elif [ -f android/build.gradle ]; then
             cat >> android/build.gradle <<'EOF'
 
@@ -91,10 +209,43 @@ jobs:
             echo "No root gradle file found"; exit 1
           fi
 
+      - name: Set up release signing
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -f signing/release.jks ] && [ -n "$KS_PASS" ] && [ -f android/app/build.gradle.kts ]; then
+            python3 - <<'PY'
+          import os
+          p = 'android/app/build.gradle.kts'
+          s = open(p).read()
+          ks = os.path.abspath('signing/release.jks')
+          block = '''    signingConfigs {
+              create("release") {
+                  storeFile = file("%s")
+                  storePassword = System.getenv("KS_PASS")
+                  keyAlias = "offlineplayer"
+                  keyPassword = System.getenv("KS_PASS")
+                  storeType = "pkcs12"
+              }
+          }
+
+          buildTypes {''' % ks
+          s = s.replace('buildTypes {', block, 1)
+          s = s.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")')
+          open(p, 'w').write(s)
+          print('release signing enabled')
+          PY
+            grep -n "release" android/app/build.gradle.kts || true
+          else
+            echo "No signing key found: using the debug key"
+          fi
+
       - name: Get packages
         run: flutter pub get
 
       - name: Build APK
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
         run: flutter build apk --release
 
       - name: Verify final APK has no internet permission
@@ -102,6 +253,11 @@ jobs:
           AAPT2=$(ls $ANDROID_HOME/build-tools/*/aapt2 | sort -V | tail -n 1)
           "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk | tee perms.txt
           if grep -q "android.permission.INTERNET" perms.txt; then echo "INTERNET permission found in APK"; exit 1; fi
+
+      - name: Show signing certificate
+        run: |
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | sort -V | tail -n 1)
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk | head -n 5 || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
