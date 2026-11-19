@@ -7,6 +7,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/video_item.dart';
 import 'app_settings.dart';
+import 'smart_cuts.dart';
 
 class PreviewState {
   final String? id;
@@ -88,6 +89,7 @@ class PreviewController {
   void stop() {
     _token++;
     _teardown();
+    SmartCuts.instance.paused = false;
     state.value = const PreviewState();
   }
 
@@ -110,6 +112,7 @@ class PreviewController {
     if (item.path.isEmpty) return;
     final token = ++_token;
     _teardown();
+    SmartCuts.instance.paused = true;
 
     final settings = AppSettings.instance;
     final p = Player();
@@ -118,6 +121,7 @@ class PreviewController {
     state.value = PreviewState(id: item.id, name: item.name, video: v);
 
     try {
+      await SmartCuts.instance.load();
       await p.setVolume(settings.previewAudio ? 100 : 0);
       await p.open(Media(item.path), play: false);
       if (token != _token) return;
@@ -158,11 +162,23 @@ class PreviewController {
       final section = secs / n;
       final clip = min(settings.clipSeconds, section * 0.8);
 
+      List<double>? smart;
+      if (settings.smartCuts) {
+        smart = SmartCuts.instance.cutsFor(item, n);
+        if (smart == null) SmartCuts.instance.enqueue(item, n, secs);
+      }
+      final starts = <double>[
+        for (var i = 0; i < n; i++)
+          smart != null
+              ? (smart[i] - clip / 2).clamp(0.0, max(0.0, secs - clip)).toDouble()
+              : i * section + (section - clip) / 2,
+      ];
+
       await p.play();
       final a = await _readAspect(p);
       if (token != _token) return;
       _set(token, (s) => s.copyWith(aspect: a));
-      await _cut(token, p, 0, n, section, clip, true);
+      await _cut(token, p, 0, n, starts, clip, true);
     } catch (_) {
       if (token == _token) stop();
     }
@@ -173,14 +189,13 @@ class PreviewController {
     Player p,
     int i,
     int n,
-    double section,
+    List<double> starts,
     double clip,
     bool first,
   ) async {
     if (token != _token) return;
-    final startSec = i * section + (section - clip) / 2;
     try {
-      await p.seek(Duration(milliseconds: (startSec * 1000).round()));
+      await p.seek(Duration(milliseconds: (starts[i] * 1000).round()));
     } catch (_) {
       return;
     }
@@ -200,7 +215,7 @@ class PreviewController {
     _timer?.cancel();
     _timer = Timer(
       Duration(milliseconds: clipMs),
-      () => _cut(token, p, (i + 1) % n, n, section, clip, false),
+      () => _cut(token, p, (i + 1) % n, n, starts, clip, false),
     );
   }
 }
