@@ -11,7 +11,19 @@ import '../services/preview_controller.dart';
 import '../services/thumbnail_service.dart';
 import '../utils/format.dart';
 
-enum VideoAction { play, favorite, tags, rename, copyTo, moveTo, select, delete }
+enum VideoAction {
+  play,
+  favorite,
+  tags,
+  playlists,
+  bookmarks,
+  select,
+  rename,
+  moveTo,
+  copyTo,
+  vault,
+  delete,
+}
 
 class VideoCard extends StatefulWidget {
   final VideoItem item;
@@ -131,13 +143,17 @@ class _VideoCardState extends State<VideoCard> {
 
   Widget _buildCard(AppSettings settings, LibraryStore store) {
     final item = widget.item;
+    final key = item.key;
     final selecting = widget.selecting;
     final selected = widget.selected;
     final primary = Theme.of(context).colorScheme.primary;
     final shownDuration =
         _duration ?? ThumbnailService.instance.durations[item.id] ?? item.duration;
-    final fav = store.isFav(item.path);
-    final tags = store.tagsFor(item.path);
+    final fav = store.isFav(key);
+    final hidden = store.isHidden(key);
+    final tags = store.tagsFor(key);
+    final prog = store.progressFor(key);
+    final frac = prog?.fraction ?? 0.0;
     final sub = StringBuffer(formatSize(item.sizeBytes));
     if (tags.isNotEmpty) {
       sub.write('  ·  ${tags.map((t) => '#$t').join(' ')}');
@@ -163,6 +179,18 @@ class _VideoCardState extends State<VideoCard> {
               cacheWidth: 480,
               gaplessPlayback: true,
               errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            ),
+          if (frac > 0.02 && frac < 0.97)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 3,
+                backgroundColor: Colors.black38,
+                color: Colors.redAccent,
+              ),
             ),
           if (!settings.largePreview && !selecting)
             Positioned.fill(
@@ -216,7 +244,17 @@ class _VideoCardState extends State<VideoCard> {
             Positioned(
               left: 6,
               top: 6,
-              child: _Badge(text: item.source.label),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _Badge(text: item.source.label),
+                  if (hidden)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 4),
+                      child: Icon(Icons.lock, size: 16, color: Colors.amber),
+                    ),
+                ],
+              ),
             ),
           if (item.path.isNotEmpty && !selecting)
             Positioned(
@@ -224,7 +262,7 @@ class _VideoCardState extends State<VideoCard> {
               top: 0,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => store.toggleFav(item.path),
+                onTap: () => store.toggleFav(key),
                 child: Padding(
                   padding: const EdgeInsets.all(6),
                   child: Icon(
@@ -318,6 +356,14 @@ class _VideoCardState extends State<VideoCard> {
                         child: Text('Tags...'),
                       ),
                       const PopupMenuItem(
+                        value: VideoAction.playlists,
+                        child: Text('Playlists...'),
+                      ),
+                      const PopupMenuItem(
+                        value: VideoAction.bookmarks,
+                        child: Text('Bookmarks...'),
+                      ),
+                      const PopupMenuItem(
                         value: VideoAction.select,
                         child: Text('Select'),
                       ),
@@ -334,10 +380,15 @@ class _VideoCardState extends State<VideoCard> {
                         value: VideoAction.copyTo,
                         child: Text('Copy to...'),
                       ),
+                      PopupMenuItem(
+                        value: VideoAction.vault,
+                        child: Text(
+                            hidden ? 'Remove from vault' : 'Move to vault'),
+                      ),
                       const PopupMenuDivider(),
                       const PopupMenuItem(
                         value: VideoAction.delete,
-                        child: Text('Delete'),
+                        child: Text('Delete (to trash)'),
                       ),
                     ],
                     child: const SizedBox(
