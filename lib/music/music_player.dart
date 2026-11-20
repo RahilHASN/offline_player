@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:media_kit/media_kit.dart' hide Track;
 
 import '../services/native_bridge.dart';
 import 'track.dart';
