@@ -12,6 +12,10 @@ concurrency:
 jobs:
   android:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [offline, online]
     steps:
       - uses: actions/checkout@v4
 
@@ -37,10 +41,16 @@ jobs:
           find android -name AndroidManifest.xml -exec sed -i '/android.permission.INTERNET/d' {} +
           sed -i 's/android:label="[^"]*"/android:label="Offline Player"/' "$M"
           sed -i 's#<manifest#<manifest xmlns:tools="http://schemas.android.com/tools" #' "$M"
-          sed -i 's#<application#<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />\n    <application#' "$M"
+          sed -i 's#<application#<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application#' "$M"
+          if [ "${{ matrix.variant }}" = "online" ]; then
+            NET='<uses-permission android:name="android.permission.INTERNET" />'
+          else
+            NET='<uses-permission android:name="android.permission.INTERNET" tools:node="remove" />'
+          fi
+          sed -i "s#<application#$NET\n    <application#" "$M"
           grep -q "READ_MEDIA_VIDEO" "$M" || { echo "Manifest edit failed"; exit 1; }
           grep -q "MANAGE_EXTERNAL_STORAGE" "$M" || { echo "Manifest edit failed"; exit 1; }
-          grep -q 'tools:node="remove"' "$M" || { echo "Manifest edit failed"; exit 1; }
+          grep -q "permission.INTERNET" "$M" || { echo "Manifest edit failed"; exit 1; }
 
       - name: Add native helpers (picture-in-picture, background play)
         run: |
@@ -246,13 +256,17 @@ jobs:
       - name: Build APK
         env:
           KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-        run: flutter build apk --release
+        run: flutter build apk --release --dart-define=ONLINE=${{ matrix.variant == 'online' }}
 
-      - name: Verify final APK has no internet permission
+      - name: Verify internet permission matches the variant
         run: |
           AAPT2=$(ls $ANDROID_HOME/build-tools/*/aapt2 | sort -V | tail -n 1)
           "$AAPT2" dump permissions build/app/outputs/flutter-apk/app-release.apk | tee perms.txt
-          if grep -q "android.permission.INTERNET" perms.txt; then echo "INTERNET permission found in APK"; exit 1; fi
+          if [ "${{ matrix.variant }}" = "offline" ]; then
+            if grep -q "android.permission.INTERNET" perms.txt; then echo "INTERNET permission found in the OFFLINE APK"; exit 1; fi
+          else
+            grep -q "android.permission.INTERNET" perms.txt || { echo "ONLINE APK is missing INTERNET"; exit 1; }
+          fi
 
       - name: Show signing certificate
         run: |
@@ -262,7 +276,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: offline-player-android
+          name: offline-player-android-${{ matrix.variant }}
           path: build/app/outputs/flutter-apk/app-release.apk
 
   windows:
@@ -285,7 +299,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows
-        run: flutter build windows --release
+        run: flutter build windows --release --dart-define=ONLINE=true
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
