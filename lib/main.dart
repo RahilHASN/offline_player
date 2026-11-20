@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
-import 'screens/library_screen.dart';
+import 'screens/home_screen.dart';
+import 'services/app_mode.dart';
 import 'services/app_settings.dart';
 import 'services/library_store.dart';
 import 'services/thumb_cache.dart';
 import 'services/trash_service.dart';
+import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  await AppMode.instance.load();
   await AppSettings.instance.load();
   await LibraryStore.instance.load();
   await TrashService.instance.load();
@@ -28,13 +31,8 @@ class OfflinePlayerApp extends StatelessWidget {
     return MaterialApp(
       title: 'Offline Player',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorSchemeSeed: Colors.indigo,
-        scaffoldBackgroundColor: const Color(0xFF0F0F14),
-      ),
-      home: const LibraryScreen(),
+      theme: buildTheme(),
+      home: const HomeScreen(),
     );
   }
 }
