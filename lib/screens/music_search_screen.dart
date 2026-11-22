@@ -10,6 +10,7 @@ import '../bridge/providers/youtube_provider.dart';
 import '../bridge/registry.dart';
 import '../music/music_library.dart';
 import '../music/music_player.dart';
+import '../music/track.dart';
 import '../services/app_mode.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/track_tile.dart';
