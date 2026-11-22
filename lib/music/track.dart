@@ -1,4 +1,4 @@
-enum TrackSource { local, jamendo }
+enum TrackSource { local, jamendo, web }
 
 class Track {
   final String id;
