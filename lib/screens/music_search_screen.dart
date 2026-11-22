@@ -178,8 +178,8 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
     final online = AppMode.instance.online;
     final all = MusicLibrary.instance.tracks;
     final showDevice = _src == _Src.all || _src == _Src.device;
-    final local = !showDevice || _isLink(raw)
-        ? const []
+    final List<Track> local = (!showDevice || _isLink(raw))
+        ? <Track>[]
         : (q.isEmpty
             ? all
             : all
