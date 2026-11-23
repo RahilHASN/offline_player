@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../bridge/providers/youtube_provider.dart';
 import '../bridge/registry.dart';
 import '../services/app_mode.dart';
+import 'youtube_badge.dart';
 
 /// Online / Offline pill. Tap to switch (online build only).
 class ModeChip extends StatelessWidget {
@@ -22,7 +24,7 @@ class ModeChip extends StatelessWidget {
                 ..hideCurrentSnackBar()
                 ..showSnackBar(const SnackBar(
                   content: Text(
-                      'This is the offline-only build. Install the online build to stream music.'),
+                      'This is the offline-only build. Install the online build to use YouTube.'),
                 ));
               return;
             }
@@ -36,7 +38,6 @@ class ModeChip extends StatelessWidget {
 
 void showOnlineSettings(BuildContext context) {
   final m = AppMode.instance;
-  final jam = TextEditingController(text: m.jamendoId);
   final yt = TextEditingController(text: m.youtubeKey);
   showModalBottomSheet<void>(
     context: context,
@@ -52,8 +53,14 @@ void showOnlineSettings(BuildContext context) {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Online settings',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              Row(
+                children: const [
+                  Text('Online settings',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                  Spacer(),
+                  YouTubeBadge(),
+                ],
+              ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Online mode'),
@@ -64,15 +71,6 @@ void showOnlineSettings(BuildContext context) {
                 onChanged: AppMode.onlineBuild ? m.setOnline : null,
               ),
               const SizedBox(height: 8),
-              TextField(
-                controller: jam,
-                decoration: const InputDecoration(
-                  labelText: 'Jamendo client ID',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-              ),
-              const SizedBox(height: 10),
               TextField(
                 controller: yt,
                 obscureText: true,
@@ -87,19 +85,28 @@ void showOnlineSettings(BuildContext context) {
                 alignment: Alignment.centerRight,
                 child: FilledButton(
                   onPressed: () {
-                    m.setJamendoId(jam.text);
                     m.setYoutubeKey(yt.text);
                     Navigator.pop(ctx);
                   },
                   child: const Text('Save'),
                 ),
               ),
+              FutureBuilder<void>(
+                future: YouTubeQuota.instance.load(),
+                builder: (_, __) {
+                  final q = YouTubeQuota.instance;
+                  final left = (YouTubeQuota.budget - q.used) ~/ 101;
+                  return Text(
+                    'Used today: ${q.used} / ${YouTubeQuota.budget} units (about $left searches left)',
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  );
+                },
+              ),
               const SizedBox(height: 8),
               const Text(
-                'Jamendo: devportal.jamendo.com, create a non-commercial application, copy its Client ID.\n'
-                'YouTube: console.cloud.google.com, enable "YouTube Data API v3", create an API key '
-                'and restrict it to that API. The free budget is about 100 searches a day. '
-                'The key stays on this device.',
+                'Get a key: console.cloud.google.com, enable "YouTube Data API v3", '
+                'create an API key and restrict it to that API. The free budget is '
+                'about 100 searches a day. The key stays on this device.',
                 style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
               const SizedBox(height: 12),
@@ -114,8 +121,8 @@ void showOnlineSettings(BuildContext context) {
                       style: const TextStyle(fontSize: 11)),
                 ),
               const Text(
-                'Also: LRCLIB (lyrics), MusicBrainz and Cover Art Archive (posters), '
-                'Internet Archive (music videos). Nothing is fetched unless Online mode is on.',
+                'Also: LRCLIB (lyrics) and MusicBrainz with Cover Art Archive (posters) '
+                'for songs on your device. Nothing is fetched unless Online mode is on.',
                 style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
             ],
