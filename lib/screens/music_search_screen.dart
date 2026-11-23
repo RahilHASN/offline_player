@@ -1,11 +1,9 @@
-import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 
 import '../bridge/playback.dart';
 import '../bridge/provider.dart';
-import '../bridge/providers/jamendo_provider.dart';
 import '../bridge/providers/youtube_provider.dart';
 import '../bridge/registry.dart';
 import '../music/music_library.dart';
@@ -14,8 +12,9 @@ import '../music/track.dart';
 import '../services/app_mode.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/track_tile.dart';
+import '../widgets/youtube_badge.dart';
 
-enum _Src { all, device, jamendo, youtube }
+enum _Mode { songs, videos, device }
 
 class MusicSearchScreen extends StatefulWidget {
   const MusicSearchScreen({super.key});
@@ -26,60 +25,36 @@ class MusicSearchScreen extends StatefulWidget {
 
 class _MusicSearchScreenState extends State<MusicSearchScreen> {
   final TextEditingController _c = TextEditingController();
-  Timer? _t;
-  _Src _src = _Src.all;
-  List<MediaItem> _jam = <MediaItem>[];
-  List<MediaItem> _yt = <MediaItem>[];
+  _Mode _mode = AppMode.instance.online ? _Mode.songs : _Mode.device;
+  List<MediaItem> _songs = <MediaItem>[];
+  List<MediaItem> _videos = <MediaItem>[];
   bool _busy = false;
   String? _err;
 
   @override
   void dispose() {
-    _t?.cancel();
     _c.dispose();
     super.dispose();
   }
 
   bool _isLink(String q) => q.startsWith('http://') || q.startsWith('https://');
 
-  bool get _wantsJamendo => _src == _Src.all || _src == _Src.jamendo;
-
-  void _changed(String q) {
-    setState(() {});
-    _t?.cancel();
-    final m = AppMode.instance;
-    final t = q.trim();
-    if (!_wantsJamendo || !m.online || t.length < 2 || m.jamendoId.isEmpty || _isLink(t)) {
-      if (_jam.isNotEmpty) setState(() => _jam = <MediaItem>[]);
-      return;
-    }
-    _t = Timer(const Duration(milliseconds: 500), () => _searchJam(t));
-  }
-
-  Future<void> _searchJam(String q) async {
-    setState(() => _busy = true);
-    try {
-      final r = await JamendoProvider().search(q);
-      if (!mounted || _c.text.trim() != q) return;
-      setState(() {
-        _jam = r;
-        _err = null;
-      });
-    } catch (e) {
-      if (mounted) setState(() => _err = '$e');
-    }
-    if (mounted) setState(() => _busy = false);
-  }
-
   Future<void> _searchYt(String q) async {
+    final music = _mode == _Mode.songs;
     setState(() {
       _busy = true;
       _err = null;
     });
     try {
-      final r = await YouTubeProvider.instance.search(q);
+      final r = await YouTubeProvider.instance.find(q, music: music);
       if (!mounted) return;
-      setState(() => _yt = r);
+      setState(() {
+        if (music) {
+          _songs = r;
+        } else {
+          _videos = r;
+        }
+      });
     } catch (e) {
       if (mounted) setState(() => _err = '$e');
     }
@@ -106,37 +81,21 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
   void _submit(String q) {
     final t = q.trim();
     if (t.isEmpty) return;
-    if (!AppMode.instance.online && (_isLink(t) || _src == _Src.youtube)) {
+    if (!AppMode.instance.online && (_isLink(t) || _mode != _Mode.device)) {
       setState(() => _err = 'Switch to Online mode first.');
       return;
     }
     if (_isLink(t)) {
       _openLink(t);
-    } else if (_src == _Src.youtube) {
+    } else if (_mode != _Mode.device) {
       _searchYt(t);
-    } else if (_wantsJamendo && AppMode.instance.online) {
-      _searchJam(t);
     }
   }
 
   String _fmt(int s) {
-    final m = s ~/ 60;
     final r = s % 60;
-    return '$m:${r.toString().padLeft(2, '0')}';
+    return '${s ~/ 60}:${r.toString().padLeft(2, '0')}';
   }
-
-  Widget _header(String text, {Widget? trailing}) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 8, 4),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(text,
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
-            ),
-            if (trailing != null) trailing,
-          ],
-        ),
-      );
 
   Widget _spinner() => const Padding(
         padding: EdgeInsets.only(right: 12),
@@ -144,20 +103,38 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
             width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
       );
 
-  Widget _ytTile(MediaItem m) => ListTile(
-        onTap: () => Playback.play(context, m, queue: _yt),
-        leading: SizedBox(
-          width: 96,
-          height: 54,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: m.thumb == null
-                ? Container(color: Colors.white10)
-                : Image.network(m.thumb!,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Container(color: Colors.white10)),
-          ),
+  Widget _thumb(MediaItem m, double w, double h) => SizedBox(
+        width: w,
+        height: h,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: m.thumb == null
+              ? Container(color: Colors.white10)
+              : Image.network(m.thumb!,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(color: Colors.white10)),
         ),
+      );
+
+  Widget _songTile(MediaItem m, List<MediaItem> list) => ListTile(
+        onTap: () => Playback.play(context, m, queue: list),
+        leading: _thumb(m, 56, 56),
+        title: Text(m.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text(
+          [m.creator, if (m.durationSec > 0) _fmt(m.durationSec)].join(' · '),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 12, color: Colors.white54),
+        ),
+        trailing: const Icon(Icons.play_circle_outline, color: Colors.white54),
+      );
+
+  Widget _videoTile(MediaItem m, List<MediaItem> list) => ListTile(
+        onTap: () => Playback.play(context, m, queue: list),
+        leading: _thumb(m, 96, 54),
         title: Text(m.title,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
@@ -168,7 +145,7 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 12, color: Colors.white54),
         ),
-        trailing: const Icon(Icons.ondemand_video, size: 18, color: Colors.white54),
+        trailing: const Icon(Icons.play_circle_outline, color: Colors.white54),
       );
 
   @override
@@ -176,9 +153,9 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
     final raw = _c.text.trim();
     final q = raw.toLowerCase();
     final online = AppMode.instance.online;
+    final isDevice = _mode == _Mode.device;
     final all = MusicLibrary.instance.tracks;
-    final showDevice = _src == _Src.all || _src == _Src.device;
-    final List<Track> local = (!showDevice || _isLink(raw))
+    final List<Track> local = (!isDevice || _isLink(raw))
         ? <Track>[]
         : (q.isEmpty
             ? all
@@ -188,6 +165,7 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                     t.artist.toLowerCase().contains(q) ||
                     t.album.toLowerCase().contains(q))
                 .toList());
+    final list = _mode == _Mode.songs ? _songs : _videos;
 
     return Scaffold(
       bottomNavigationBar: const MiniPlayer(),
@@ -195,11 +173,11 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
         title: TextField(
           controller: _c,
           autofocus: true,
-          onChanged: _changed,
+          onChanged: (_) => setState(() {}),
           onSubmitted: _submit,
           textInputAction: TextInputAction.search,
           decoration: const InputDecoration(
-            hintText: 'Search, or paste a link',
+            hintText: 'Search songs, artists, or paste a link',
             border: InputBorder.none,
           ),
         ),
@@ -211,21 +189,20 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
               children: [
-                for (final s in _Src.values)
+                for (final s in _Mode.values)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
                     child: ChoiceChip(
                       label: Text(const {
-                        _Src.all: 'All',
-                        _Src.device: 'On device',
-                        _Src.jamendo: 'Jamendo',
-                        _Src.youtube: 'YouTube',
+                        _Mode.songs: 'Songs',
+                        _Mode.videos: 'Videos',
+                        _Mode.device: 'On device',
                       }[s]!),
-                      selected: _src == s,
-                      onSelected: (_) {
-                        setState(() => _src = s);
-                        _changed(_c.text);
-                      },
+                      selected: _mode == s,
+                      onSelected: (_) => setState(() {
+                        _mode = s;
+                        _err = null;
+                      }),
                     ),
                   ),
               ],
@@ -254,43 +231,64 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                 child: Text(_err!, style: const TextStyle(color: Colors.orangeAccent)),
               ),
             ),
-          if (local.isNotEmpty)
-            SliverToBoxAdapter(
-              child: _header(
-                q.isEmpty ? 'All songs (${local.length})' : 'On your device',
-                trailing: TextButton.icon(
-                  onPressed: () => MusicPlayer.instance
-                      .playQueue(local, Random().nextInt(local.length), shuffle: true),
-                  icon: const Icon(Icons.shuffle, size: 18),
-                  label: const Text('Shuffle'),
+          if (isDevice) ...[
+            if (local.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 8, 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          q.isEmpty ? 'All songs (${local.length})' : 'On your device',
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: () => MusicPlayer.instance.playQueue(
+                            local, Random().nextInt(local.length),
+                            shuffle: true),
+                        icon: const Icon(Icons.shuffle, size: 18),
+                        label: const Text('Shuffle'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          SliverList.builder(
-            itemCount: local.length,
-            itemBuilder: (context, i) => TrackTile(
-              track: local[i],
-              onTap: () => MusicPlayer.instance.playQueue(local, i),
-            ),
-          ),
-          if (online && _wantsJamendo && raw.length >= 2 && !_isLink(raw)) ...[
-            SliverToBoxAdapter(
-              child: _header('Online (Jamendo)', trailing: _busy ? _spinner() : null),
-            ),
             SliverList.builder(
-              itemCount: _jam.length,
-              itemBuilder: (context, i) {
-                final t = _jam[i].track!;
-                return TrackTile(
-                  track: t,
-                  onTap: () => Playback.play(context, _jam[i], queue: _jam),
-                );
-              },
+              itemCount: local.length,
+              itemBuilder: (context, i) => TrackTile(
+                track: local[i],
+                onTap: () => MusicPlayer.instance.playQueue(local, i),
+              ),
             ),
-          ],
-          if (_src == _Src.youtube) ...[
+            if (local.isEmpty && !_isLink(raw))
+              const SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Center(
+                    child: Text('Nothing found.',
+                        style: TextStyle(color: Colors.white54)),
+                  ),
+                ),
+              ),
+          ] else ...[
             SliverToBoxAdapter(
-              child: _header('YouTube', trailing: _busy ? _spinner() : null),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 8, 4),
+                child: Row(
+                  children: [
+                    const YouTubeBadge(),
+                    const SizedBox(width: 8),
+                    Text(_mode == _Mode.songs ? 'Songs' : 'Videos',
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w800)),
+                    const Spacer(),
+                    if (_busy) _spinner(),
+                  ],
+                ),
+              ),
             ),
             SliverToBoxAdapter(
               child: Padding(
@@ -298,30 +296,22 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                 child: Text(
                   !online
                       ? 'Switch to Online mode to search YouTube.'
-                      : 'Press search on the keyboard. Videos play in YouTube\'s official player. '
-                          'Each search uses ${YouTubeQuota.searchCost} of your free daily units.',
+                      : list.isEmpty && !_busy
+                          ? 'Type a song or artist and press search on the keyboard. '
+                              'Results play in YouTube\'s official player. '
+                              'Each search uses ${YouTubeQuota.searchCost} of your free daily units.'
+                          : 'Plays in YouTube\'s official player.',
                   style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
             ),
             SliverList.builder(
-              itemCount: _yt.length,
-              itemBuilder: (context, i) => _ytTile(_yt[i]),
+              itemCount: list.length,
+              itemBuilder: (context, i) => _mode == _Mode.songs
+                  ? _songTile(list[i], list)
+                  : _videoTile(list[i], list),
             ),
           ],
-          if (local.isEmpty &&
-              _jam.isEmpty &&
-              _yt.isEmpty &&
-              !_isLink(raw) &&
-              _src != _Src.youtube)
-            const SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.all(32),
-                child: Center(
-                  child: Text('Nothing found.', style: TextStyle(color: Colors.white54)),
-                ),
-              ),
-            ),
           const SliverToBoxAdapter(child: SizedBox(height: 24)),
         ],
       ),
