@@ -34,7 +34,8 @@ jobs:
 
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name offline_player --org com.example.offlineplayer .
-              - name: Disable broken Android lint check
+
+      - name: Disable broken Android lint check
         run: |
           mkdir -p ~/.gradle/init.d
           cat > ~/.gradle/init.d/no-lint.gradle <<'EOF'
