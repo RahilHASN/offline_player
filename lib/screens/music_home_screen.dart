@@ -3,25 +3,19 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
-import '../models/video_item.dart';
+import '../bridge/playback.dart';
+import '../bridge/provider.dart';
+import '../bridge/youtube_history.dart';
 import '../music/music_library.dart';
 import '../music/music_player.dart';
-import '../music/online_sources.dart';
 import '../music/track.dart';
 import '../services/app_mode.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/online_settings.dart';
 import '../widgets/poster.dart';
+import '../widgets/youtube_badge.dart';
 import 'music_search_screen.dart';
-import 'player_screen.dart';
-
-class _RowDef {
-  final String title;
-  final String? tags;
-  final String order;
-  const _RowDef(this.title, this.tags, this.order);
-}
 
 class _Feat {
   final Track track;
@@ -38,89 +32,16 @@ class MusicHomeScreen extends StatefulWidget {
 }
 
 class _MusicHomeScreenState extends State<MusicHomeScreen> {
-  static const _defs = <_RowDef>[
-    _RowDef('Trending this week', null, 'popularity_week'),
-    _RowDef('New releases', null, 'releasedate_desc'),
-    _RowDef('Electronic', 'electronic', 'popularity_month'),
-    _RowDef('Pop', 'pop', 'popularity_month'),
-    _RowDef('Rock', 'rock', 'popularity_month'),
-    _RowDef('Hip-hop', 'hiphop', 'popularity_month'),
-    _RowDef('Chill & lounge', 'lounge', 'popularity_month'),
-    _RowDef('Jazz', 'jazz', 'popularity_month'),
-    _RowDef('Classical', 'classical', 'popularity_month'),
-  ];
-
   final MusicLibrary lib = MusicLibrary.instance;
-  final Map<String, List<Track>> _rows = <String, List<Track>>{};
-  List<ArchiveVideo> _videos = <ArchiveVideo>[];
-  String? _err;
-  bool _loadingOnline = false;
-  bool _reload = false;
 
   @override
   void initState() {
     super.initState();
     lib.init();
-    AppMode.instance.addListener(_loadOnline);
-    _loadOnline();
-  }
-
-  @override
-  void dispose() {
-    AppMode.instance.removeListener(_loadOnline);
-    super.dispose();
-  }
-
-  Future<void> _loadOnline() async {
-    final m = AppMode.instance;
-    if (!m.online) {
-      if (mounted) {
-        setState(() {
-          _rows.clear();
-          _videos = <ArchiveVideo>[];
-          _err = null;
-        });
-      }
-      return;
-    }
-    if (_loadingOnline) {
-      _reload = true;
-      return;
-    }
-    setState(() {
-      _loadingOnline = true;
-      _err = null;
-      _rows.clear();
-    });
-    try {
-      if (m.jamendoId.trim().isNotEmpty) {
-        for (final d in _defs) {
-          final l = await OnlineSources.jamendo(
-              tags: d.tags, order: d.order, limit: 24);
-          if (!mounted) return;
-          if (l.isNotEmpty) setState(() => _rows[d.title] = l);
-        }
-      }
-    } catch (e) {
-      if (mounted) setState(() => _err = '$e');
-    }
-    try {
-      final v = await OnlineSources.musicVideos();
-      if (mounted) setState(() => _videos = v);
-    } catch (_) {}
-    if (!mounted) return;
-    setState(() => _loadingOnline = false);
-    if (_reload) {
-      _reload = false;
-      _loadOnline();
-    }
+    YouTubeHistory.instance.load();
   }
 
   _Feat? _featured() {
-    if (AppMode.instance.online && _rows.isNotEmpty) {
-      final l = _rows.values.first;
-      return _Feat(l.first, l, 'FEATURED');
-    }
     if (lib.tracks.isNotEmpty) {
       final recent = List<Track>.of(lib.tracks)
         ..sort((a, b) => b.addedMs.compareTo(a.addedMs));
@@ -133,39 +54,6 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
     MusicPlayer.instance.playQueue(list, i, shuffle: shuffle);
   }
 
-  Future<void> _playVideo(ArchiveVideo v) async {
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-    String? url;
-    try {
-      url = await OnlineSources.videoUrl(v.id);
-    } catch (_) {}
-    if (!mounted) return;
-    Navigator.of(context).pop();
-    if (url == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No playable file found for this video.')),
-      );
-      return;
-    }
-    MusicPlayer.instance.pause();
-    final item = VideoItem(
-      id: 'net:${v.id}',
-      path: url,
-      name: v.title,
-      sizeBytes: v.id.hashCode.abs(),
-      duration: null,
-      date: DateTime.fromMillisecondsSinceEpoch(0),
-      source: VideoSource.pc,
-    );
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => PlayerScreen(queue: [item], index: 0),
-    ));
-  }
-
   void _openSearch() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => const MusicSearchScreen()),
@@ -175,9 +63,10 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Listenable.merge([lib, AppMode.instance]),
+      listenable: Listenable.merge([lib, AppMode.instance, YouTubeHistory.instance]),
       builder: (context, _) {
         final m = AppMode.instance;
+        final hist = YouTubeHistory.instance.items;
         final feat = _featured();
         final recent = List<Track>.of(lib.tracks)
           ..sort((a, b) => b.addedMs.compareTo(a.addedMs));
@@ -187,7 +76,6 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
           body: RefreshIndicator(
             onRefresh: () async {
               await lib.scan();
-              await _loadOnline();
             },
             child: CustomScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
@@ -208,6 +96,7 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
                         if (v == 'rescan') lib.scan();
                         if (v == 'folder') lib.addFolder();
                         if (v == 'online') showOnlineSettings(context);
+                        if (v == 'clear') YouTubeHistory.instance.clear();
                       },
                       itemBuilder: (context) => const [
                         PopupMenuItem(value: 'rescan', child: Text('Rescan music')),
@@ -215,12 +104,27 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
                             value: 'folder', child: Text('Add music folder')),
                         PopupMenuItem(
                             value: 'online', child: Text('Online settings')),
+                        PopupMenuItem(
+                            value: 'clear',
+                            child: Text('Clear YouTube history')),
                       ],
                     ),
                   ],
                 ),
                 SliverToBoxAdapter(child: _hero(feat)),
                 SliverToBoxAdapter(child: _notices(m)),
+                if (m.online)
+                  SliverToBoxAdapter(
+                    child: Card(
+                      margin: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                      child: ListTile(
+                        onTap: _openSearch,
+                        leading: const YouTubeBadge(),
+                        title: const Text('Search songs and videos'),
+                        trailing: const Icon(Icons.search),
+                      ),
+                    ),
+                  ),
                 if (lib.loading && lib.tracks.isEmpty)
                   const SliverToBoxAdapter(
                     child: Padding(
@@ -228,24 +132,12 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
                       child: Center(child: CircularProgressIndicator()),
                     ),
                   ),
+                if (m.online && hist.isNotEmpty) _ytRow(hist),
                 if (lib.tracks.isNotEmpty)
                   _row('Recently added', recent.take(20).toList()),
                 if (lib.tracks.isNotEmpty)
                   _row('Your songs', lib.tracks.take(30).toList(),
                       onMore: _openSearch),
-                for (final e in _rows.entries) _row(e.key, e.value),
-                if (_videos.isNotEmpty) _videoRow(),
-                if (_loadingOnline)
-                  const SliverToBoxAdapter(
-                    child: Padding(
-                      padding: EdgeInsets.all(16),
-                      child: Center(
-                          child: SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(strokeWidth: 2))),
-                    ),
-                  ),
                 const SliverToBoxAdapter(child: SizedBox(height: 24)),
               ],
             ),
@@ -390,20 +282,16 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
         Icons.cloud_off,
         AppMode.onlineBuild
             ? 'Offline mode: only your own music is shown. Tap "Offline" above '
-                'for trending music, lyrics and posters.'
+                'to search YouTube.'
             : 'Offline-only build: your own music, no internet.',
       ));
-    } else if (m.jamendoId.isEmpty) {
+    } else if (m.youtubeKey.isEmpty) {
       items.add(_notice(
         Icons.key,
-        'Add your free Jamendo client ID to see online music.',
+        'Add your YouTube API key to search YouTube.',
         button: 'Add',
         onTap: () => showOnlineSettings(context),
       ));
-    }
-    if (_err != null) {
-      items.add(_notice(Icons.error_outline, 'Online problem: $_err',
-          button: 'Retry', onTap: _loadOnline));
     }
     return Column(children: items);
   }
@@ -445,70 +333,83 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
     );
   }
 
-  SliverToBoxAdapter _videoRow() {
+  SliverToBoxAdapter _ytRow(List<MediaItem> items) {
     return SliverToBoxAdapter(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 18, 8, 8),
-            child: Text('Music videos',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+            child: Row(
+              children: [
+                Text('Recently played',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                SizedBox(width: 10),
+                YouTubeBadge(size: 14),
+              ],
+            ),
           ),
           SizedBox(
-            height: 150,
+            height: 200,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: _videos.length,
+              itemCount: items.length,
               separatorBuilder: (_, __) => const SizedBox(width: 12),
-              itemBuilder: (context, i) {
-                final v = _videos[i];
-                return GestureDetector(
-                  onTap: () => _playVideo(v),
-                  child: SizedBox(
-                    width: 230,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(14),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          const ColoredBox(color: AppColors.card),
-                          Image.network(
-                            v.thumb,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => const Center(
-                                child: Icon(Icons.movie_outlined,
-                                    color: Colors.white24, size: 40)),
-                          ),
-                          const DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.center,
-                                end: Alignment.bottomCenter,
-                                colors: [Colors.transparent, Colors.black87],
-                              ),
+              itemBuilder: (context, i) => GestureDetector(
+                onTap: () => Playback.play(context, items[i], queue: items),
+                child: SizedBox(
+                  width: 138,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        const ColoredBox(color: AppColors.card),
+                        if (items[i].thumb != null)
+                          Image.network(items[i].thumb!,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => const SizedBox()),
+                        const DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.center,
+                              end: Alignment.bottomCenter,
+                              colors: [Colors.transparent, Colors.black87],
                             ),
                           ),
-                          Positioned(
-                            left: 10,
-                            right: 10,
-                            bottom: 8,
-                            child: Text(v.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    fontSize: 12.5, fontWeight: FontWeight.bold)),
+                        ),
+                        const Positioned(
+                          top: 8,
+                          left: 8,
+                          child: YouTubeBadge(size: 11),
+                        ),
+                        Positioned(
+                          left: 10,
+                          right: 10,
+                          bottom: 10,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(items[i].title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 12.5, fontWeight: FontWeight.bold)),
+                              Text(items[i].creator,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 11, color: Colors.white70)),
+                            ],
                           ),
-                          const Center(
-                              child: Icon(Icons.play_circle_fill,
-                                  size: 38, color: Colors.white70)),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
-                );
-              },
+                ),
+              ),
             ),
           ),
         ],
