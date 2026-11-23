@@ -78,7 +78,7 @@ class YouTubeProvider implements MediaProvider {
         needsKey: true,
       );
 
-  // Short-lived, in memory only. Nothing from YouTube is saved to disk.
+  // Short-lived, in memory only.
   static const _ttl = Duration(minutes: 10);
   static const _maxEntries = 30;
   final Map<String, _Hit> _cache = <String, _Hit>{};
@@ -116,6 +116,28 @@ class YouTubeProvider implements MediaProvider {
     return g(1) * 86400 + g(2) * 3600 + g(3) * 60 + g(4);
   }
 
+  /// Splits "Artist - Song (Official Video)" into (song, artist).
+  /// Without " - " in the title, the channel name is used as the artist.
+  static (String, String) split(String title, String channel) {
+    var t = _decode(title);
+    t = t
+        .replaceAll(
+            RegExp(
+                r'\s*[\(\[](official|lyrics?|lyric video|audio|video|music video|hd|4k|visuali[sz]er)[^\)\]]*[\)\]]',
+                caseSensitive: false),
+            '')
+        .trim();
+    final ch = _decode(channel)
+        .replaceAll(RegExp(r'\s*-\s*Topic$', caseSensitive: false), '')
+        .replaceAll(RegExp(r'VEVO$', caseSensitive: false), '')
+        .trim();
+    final i = t.indexOf(' - ');
+    if (i > 0 && i < t.length - 3) {
+      return (t.substring(i + 3).trim(), t.substring(0, i).trim());
+    }
+    return (t, ch);
+  }
+
   /// Video id from a pasted YouTube link, or null.
   static String? idFromUri(Uri u) {
     final h = u.host.toLowerCase();
@@ -128,7 +150,8 @@ class YouTubeProvider implements MediaProvider {
         h.endsWith('.youtube-nocookie.com')) {
       id = u.queryParameters['v'];
       final s = u.pathSegments;
-      if (id == null && s.length >= 2 &&
+      if (id == null &&
+          s.length >= 2 &&
           const <String>['embed', 'shorts', 'live', 'v'].contains(s.first)) {
         id = s[1];
       }
@@ -146,7 +169,7 @@ class YouTubeProvider implements MediaProvider {
     final sn = m['snippet'] is Map ? m['snippet'] as Map : const {};
     final th = sn['thumbnails'] is Map ? sn['thumbnails'] as Map : const {};
     String? thumb;
-    for (final k in const <String>['high', 'medium', 'default']) {
+    for (final k in const <String>['standard', 'high', 'medium', 'default']) {
       final t = th[k];
       if (t is Map && t['url'] is String) {
         thumb = t['url'] as String;
@@ -154,11 +177,13 @@ class YouTubeProvider implements MediaProvider {
       }
     }
     final cd = m['contentDetails'] is Map ? m['contentDetails'] as Map : const {};
+    final (song, artist) =
+        split('${sn['title'] ?? 'Untitled'}', '${sn['channelTitle'] ?? ''}');
     return MediaItem(
       id: 'y:$id',
       providerId: 'youtube',
-      title: _decode('${sn['title'] ?? 'Untitled'}'),
-      creator: _decode('${sn['channelTitle'] ?? ''}'),
+      title: song,
+      creator: artist,
       thumb: thumb,
       durationSec: parseDuration(cd['duration'] as String?),
       kind: MediaKind.video,
@@ -184,13 +209,13 @@ class YouTubeProvider implements MediaProvider {
     return out;
   }
 
-  @override
-  Future<List<MediaItem>> search(String query) async {
+  /// [music] true limits results to YouTube's Music category.
+  Future<List<MediaItem>> find(String query, {required bool music}) async {
     final key = AppMode.instance.youtubeKey.trim();
     if (key.isEmpty) throw 'Add your YouTube API key in Online settings';
     final q = query.trim();
     if (q.length < 2) return <MediaItem>[];
-    final ck = 's:${q.toLowerCase()}';
+    final ck = '${music ? 'm' : 'v'}:${q.toLowerCase()}';
     final hit = _get(ck);
     if (hit != null) return hit;
 
@@ -199,16 +224,19 @@ class YouTubeProvider implements MediaProvider {
     if (!qt.canSpend(YouTubeQuota.searchCost + YouTubeQuota.videoCost)) {
       throw 'Daily YouTube budget reached (${qt.used}/${YouTubeQuota.budget} units). It resets daily.';
     }
-    final s = await Net.json(Uri.https('www.googleapis.com', '/youtube/v3/search', {
+    final params = <String, String>{
       'part': 'snippet',
       'type': 'video',
       'videoEmbeddable': 'true',
       'videoSyndicated': 'true',
       'safeSearch': 'moderate',
-      'maxResults': '15',
+      'maxResults': '20',
       'q': q,
       'key': key,
-    }));
+      if (music) 'videoCategoryId': '10',
+    };
+    final s = await Net.json(
+        Uri.https('www.googleapis.com', '/youtube/v3/search', params));
     await qt.spend(YouTubeQuota.searchCost);
     final ids = <String>[];
     if (s is Map && s['items'] is List) {
@@ -223,6 +251,9 @@ class YouTubeProvider implements MediaProvider {
     _put(ck, items);
     return items;
   }
+
+  @override
+  Future<List<MediaItem>> search(String query) => find(query, music: false);
 
   /// Resolves a pasted YouTube link. Uses the Data API when a key is set
   /// (1 unit), otherwise the public oEmbed endpoint.
@@ -254,11 +285,13 @@ class YouTubeProvider implements MediaProvider {
       throw 'Video not found, private, or the owner disabled embedding.';
     }
     if (j is! Map) throw 'Video not found or private.';
+    final (song, artist) =
+        split('${j['title'] ?? 'YouTube video'}', '${j['author_name'] ?? ''}');
     final item = MediaItem(
       id: 'y:$videoId',
       providerId: 'youtube',
-      title: '${j['title'] ?? 'YouTube video'}',
-      creator: '${j['author_name'] ?? ''}',
+      title: song,
+      creator: artist,
       thumb: j['thumbnail_url'] is String ? j['thumbnail_url'] as String : null,
       kind: MediaKind.video,
       videoId: videoId,
