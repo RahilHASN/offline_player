@@ -10,6 +10,7 @@ import 'provider.dart';
 import 'registry.dart';
 import 'router.dart';
 import 'youtube_embed_screen.dart';
+import 'youtube_history.dart';
 
 /// One entry point: ask the router, then hand off to the right engine.
 class Playback {
@@ -63,13 +64,24 @@ class Playback {
           }
           await MusicPlayer.instance.playQueue(tracks, i);
         }
-      case EmbedHandoff e:
+      case EmbedHandoff _:
         MusicPlayer.instance.pause();
+        final src = queue.isEmpty ? <MediaItem>[item] : queue;
+        final q = <MediaItem>[
+          for (final m in src)
+            if (m.providerId == 'youtube' && m.videoId != null) m,
+        ];
+        var i = q.indexWhere((m) => m.id == item.id);
+        if (i < 0) {
+          q.insert(0, item);
+          i = 0;
+        }
         await Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => YouTubeEmbedScreen(handoff: e, title: item.title),
+          builder: (_) => YouTubeEmbedScreen(queue: q, index: i),
         ));
       case ExternalLinkHandoff x:
         MusicPlayer.instance.pause();
+        YouTubeHistory.instance.add(item);
         final ok = await launchUrl(x.url, mode: LaunchMode.externalApplication);
         if (!ok && context.mounted) _msg(context, 'Could not open the link.');
       case UnavailableHandoff u:
