@@ -11,7 +11,6 @@ class AppMode extends ChangeNotifier {
 
   SharedPreferences? _p;
   bool _enabled = false;
-  String jamendoId = '';
   String youtubeKey = '';
 
   bool get enabled => _enabled;
@@ -23,7 +22,6 @@ class AppMode extends ChangeNotifier {
     final p = await SharedPreferences.getInstance();
     _p = p;
     _enabled = p.getBool('onlineEnabled') ?? false;
-    jamendoId = p.getString('jamendoId') ?? '';
     youtubeKey = p.getString('youtubeKey') ?? '';
   }
 
@@ -31,12 +29,6 @@ class AppMode extends ChangeNotifier {
     if (!onlineBuild) return;
     _enabled = v;
     _p?.setBool('onlineEnabled', v);
-    notifyListeners();
-  }
-
-  void setJamendoId(String v) {
-    jamendoId = v.trim();
-    _p?.setString('jamendoId', jamendoId);
     notifyListeners();
   }
 
