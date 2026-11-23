@@ -1,7 +1,6 @@
 import 'compliance.dart';
 import 'provider.dart';
 import 'providers/direct_provider.dart';
-import 'providers/jamendo_provider.dart';
 import 'providers/youtube_provider.dart';
 import 'url_guard.dart';
 
@@ -10,7 +9,6 @@ class ProviderRegistry {
   static final ProviderRegistry instance = ProviderRegistry._();
 
   final List<MediaProvider> providers = <MediaProvider>[
-    JamendoProvider(),
     YouTubeProvider.instance,
     DirectProvider.instance,
   ];
