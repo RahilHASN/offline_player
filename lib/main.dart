@@ -20,16 +20,16 @@ Future<void> main() async {
   if (limit > 0) {
     trimThumbCache(limit * 1024 * 1024);
   }
-  runApp(const OfflinePlayerApp());
+  runApp(const StreamBridgeApp());
 }
 
-class OfflinePlayerApp extends StatelessWidget {
-  const OfflinePlayerApp({super.key});
+class StreamBridgeApp extends StatelessWidget {
+  const StreamBridgeApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Offline Player',
+      title: 'StreamBridge',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
       home: const HomeScreen(),
