@@ -22,7 +22,7 @@ class YouTubeEmbedScreen extends StatefulWidget {
 }
 
 class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
-  static const _base = 'https://www.youtube.com/';
+  static const _base = 'https://com.example.offlineplayer/';
   late final WebViewController _c;
   late int _i = widget.index;
 
