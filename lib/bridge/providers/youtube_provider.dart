@@ -251,6 +251,40 @@ class YouTubeProvider implements MediaProvider {
     _put(ck, items);
     return items;
   }
+    /// Fetches details for saved video ids (1 unit per 50 ids), in the same order.
+  Future<List<MediaItem>> byIds(List<String> ids) async {
+    if (ids.isEmpty) return <MediaItem>[];
+    final found = <String, MediaItem>{};
+    final missing = <String>[];
+    for (final id in ids) {
+      final h = _get('v:$id');
+      if (h != null && h.isNotEmpty) {
+        found[id] = h.first;
+      } else {
+        missing.add(id);
+      }
+    }
+    if (missing.isNotEmpty) {
+      final key = AppMode.instance.youtubeKey.trim();
+      if (key.isEmpty) throw 'Add your YouTube API key in Online settings';
+      final qt = YouTubeQuota.instance;
+      await qt.load();
+      for (var s = 0; s < missing.length; s += 50) {
+        final end = s + 50 > missing.length ? missing.length : s + 50;
+        if (!qt.canSpend(YouTubeQuota.videoCost)) {
+          throw 'Daily YouTube budget reached (${qt.used}/${YouTubeQuota.budget} units).';
+        }
+        for (final it in await _videos(missing.sublist(s, end), key)) {
+          _put('v:${it.videoId}', <MediaItem>[it]);
+          found[it.videoId!] = it;
+        }
+      }
+    }
+    return <MediaItem>[
+      for (final id in ids)
+        if (found[id] != null) found[id]!,
+    ];
+  }
 
   @override
   Future<List<MediaItem>> search(String query) => find(query, music: false);
