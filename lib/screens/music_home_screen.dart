@@ -16,6 +16,7 @@ import '../widgets/online_settings.dart';
 import '../widgets/poster.dart';
 import '../widgets/youtube_badge.dart';
 import 'music_search_screen.dart';
+import 'yt_library_screen.dart';
 
 class _Feat {
   final Track track;
