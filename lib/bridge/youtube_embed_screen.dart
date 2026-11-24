@@ -38,7 +38,7 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
       '<script>var player;'
       'function onYouTubeIframeAPIReady(){'
       'player=new YT.Player("p",{width:"100%",height:"100%",videoId:"$id",'
-      'playerVars:{playsinline:1,rel:0,autoplay:1},'
+      'playerVars:{playsinline:1,rel:0,autoplay:1,origin:"https://com.example.offlineplayer"},'
       'events:{onStateChange:function(e){if(e.data===0){Bridge.postMessage("ended");}},'
       'onError:function(e){Bridge.postMessage("error:"+e.data);}}});}'
       'function loadVideo(v){if(player&&player.loadVideoById){player.loadVideoById(v);}}'
