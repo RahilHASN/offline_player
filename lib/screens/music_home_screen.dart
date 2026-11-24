@@ -91,6 +91,14 @@ class _MusicHomeScreenState extends State<MusicHomeScreen> {
                       icon: const Icon(Icons.search),
                       onPressed: _openSearch,
                     ),
+                    IconButton(
+                      icon: const Icon(Icons.favorite_border),
+                      tooltip: 'Favourites and playlists',
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                            builder: (_) => const YtLibraryScreen()),
+                      ),
+                    ),
                     const ModeChip(),
                     PopupMenuButton<String>(
                       onSelected: (v) {
