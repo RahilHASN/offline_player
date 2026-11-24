@@ -15,6 +15,14 @@ class NativeBridge {
     }
   }
 
+  /// When on, leaving the app (Home button) shrinks it to a floating window.
+  static Future<void> setAutoPip(bool on) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _ch.invokeMethod<bool>('autoPip', <String, Object>{'on': on});
+    } catch (_) {}
+  }
+
   static Future<void> keepAlive(bool on) async {
     if (!Platform.isAndroid) return;
     try {
