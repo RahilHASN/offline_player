@@ -70,7 +70,7 @@ class YouTubeProvider implements MediaProvider {
   @override
   String get id => 'youtube';
   @override
-  String get name => 'YouTube';
+  String get name => 'Online search';
   @override
   ProviderCaps get caps => const ProviderCaps(
         search: true,
@@ -212,7 +212,7 @@ class YouTubeProvider implements MediaProvider {
   /// [music] true limits results to YouTube's Music category.
   Future<List<MediaItem>> find(String query, {required bool music}) async {
     final key = AppMode.instance.youtubeKey.trim();
-    if (key.isEmpty) throw 'Add your YouTube API key in Online settings';
+    if (key.isEmpty) throw 'Add your search API key in Online settings';
     final q = query.trim();
     if (q.length < 2) return <MediaItem>[];
     final ck = '${music ? 'm' : 'v'}:${q.toLowerCase()}';
@@ -222,7 +222,7 @@ class YouTubeProvider implements MediaProvider {
     final qt = YouTubeQuota.instance;
     await qt.load();
     if (!qt.canSpend(YouTubeQuota.searchCost + YouTubeQuota.videoCost)) {
-      throw 'Daily YouTube budget reached (${qt.used}/${YouTubeQuota.budget} units). It resets daily.';
+      throw 'Daily search budget reached (${qt.used}/${YouTubeQuota.budget} units). It resets daily.';
     }
     final params = <String, String>{
       'part': 'snippet',
@@ -266,13 +266,13 @@ class YouTubeProvider implements MediaProvider {
     }
     if (missing.isNotEmpty) {
       final key = AppMode.instance.youtubeKey.trim();
-      if (key.isEmpty) throw 'Add your YouTube API key in Online settings';
+      if (key.isEmpty) throw 'Add your search API key in Online settings';
       final qt = YouTubeQuota.instance;
       await qt.load();
       for (var s = 0; s < missing.length; s += 50) {
         final end = s + 50 > missing.length ? missing.length : s + 50;
         if (!qt.canSpend(YouTubeQuota.videoCost)) {
-          throw 'Daily YouTube budget reached (${qt.used}/${YouTubeQuota.budget} units).';
+          throw 'Daily search budget reached (${qt.used}/${YouTubeQuota.budget} units).';
         }
         for (final it in await _videos(missing.sublist(s, end), key)) {
           _put('v:${it.videoId}', <MediaItem>[it]);
@@ -320,7 +320,7 @@ class YouTubeProvider implements MediaProvider {
     }
     if (j is! Map) throw 'Video not found or private.';
     final (song, artist) =
-        split('${j['title'] ?? 'YouTube video'}', '${j['author_name'] ?? ''}');
+        split('${j['title'] ?? 'Video'}', '${j['author_name'] ?? ''}');
     final item = MediaItem(
       id: 'y:$videoId',
       providerId: 'youtube',
@@ -347,7 +347,7 @@ class YouTubeProvider implements MediaProvider {
       ExternalLinkHandoff(
         providerId: id,
         url: Uri.https('www.youtube.com', '/watch', {'v': v}),
-        reason: 'Opens in your browser or the YouTube app.',
+        reason: 'Opens in your browser or the matching app.',
       ),
     ];
   }
