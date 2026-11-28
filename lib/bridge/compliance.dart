@@ -32,25 +32,25 @@ class Compliance {
   static void assertHandoff(Handoff h) {
     if (h is NativeHandoff) {
       if (h.providerId == 'youtube') {
-        throw const ComplianceError('YouTube can only use the official player.');
+        throw const ComplianceError('This source can only use its official player.');
       }
       final host = Uri.tryParse(h.url)?.host ?? '';
       if (isYoutubeHost(host)) {
         throw const ComplianceError(
-            'YouTube media addresses cannot be played by the built-in player.');
+            'This media address cannot be played by the built-in player.');
       }
     }
     if (h is EmbedHandoff) {
       if (h.providerId != 'youtube') {
-        throw const ComplianceError('Embeds are only used for YouTube.');
+        throw const ComplianceError('Embeds are only used for supported online sources.');
       }
       if (!validVideoId(h.videoId)) {
-        throw const ComplianceError('Invalid YouTube video id.');
+        throw const ComplianceError('Invalid video id.');
       }
       final c = h.constraints;
       if (c.audioOnly || c.backgroundPlayback || !c.playerMustBeVisible) {
         throw const ComplianceError(
-            'YouTube playback must stay visible and cannot be audio-only or background.');
+            'This playback must stay visible and cannot be audio-only or background.');
       }
       for (final k in h.embedUrl.queryParameters.keys) {
         if (!_allowedEmbedParams.contains(k)) {
