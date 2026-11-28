@@ -5,7 +5,6 @@ import '../bridge/playlist_store.dart';
 import '../bridge/provider.dart';
 import '../bridge/providers/youtube_provider.dart';
 import '../services/app_mode.dart';
-import '../widgets/youtube_badge.dart';
 
 /// Favourites and your own playlists.
 class YtLibraryScreen extends StatefulWidget {
@@ -67,9 +66,6 @@ class _YtLibraryScreenState extends State<YtLibraryScreen> {
       builder: (context, _) => Scaffold(
         appBar: AppBar(
           title: const Text('Favourites & playlists'),
-          actions: const [
-            Padding(padding: EdgeInsets.only(right: 12), child: YouTubeBadge(size: 14)),
-          ],
         ),
         body: ListView(
           children: [
