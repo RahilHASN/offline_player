@@ -8,7 +8,6 @@ import 'package:webview_flutter_android/webview_flutter_android.dart';
 import '../music/lyrics_service.dart';
 import '../music/track.dart';
 import '../services/native_bridge.dart';
-import '../widgets/youtube_badge.dart';
 import 'compliance.dart';
 import 'handoff.dart';
 import 'playlist_store.dart';
@@ -158,7 +157,7 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(const SnackBar(
-            content: Text("YouTube can't play this one here. Skipping.")));
+            content: Text("This one can't play here. Skipping.")));
       _next(auto: true);
     }
   }
@@ -289,7 +288,6 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
     final watch = Uri.https('www.youtube.com', '/watch', {'v': _cur.videoId!});
     return AppBar(
       toolbarHeight: 46,
-      title: const YouTubeBadge(size: 15),
       actions: [
         ToggleButtons(
           isSelected: [
@@ -316,7 +314,7 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
           },
           itemBuilder: (context) => const [
             PopupMenuItem(value: 'pip', child: Text('Floating window (keeps playing)')),
-            PopupMenuItem(value: 'yt', child: Text('Open in YouTube')),
+            PopupMenuItem(value: 'yt', child: Text('Open in browser or app')),
           ],
         ),
       ],
