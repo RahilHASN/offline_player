@@ -27,7 +27,7 @@ class ProviderRegistry {
     final yid = YouTubeProvider.idFromUri(u);
     if (yid != null) return YouTubeProvider.instance.fromId(yid);
     if (Compliance.isYoutubeHost(u.host)) {
-      throw 'That YouTube link has no video. Paste a link to a single video.';
+      throw 'That link has no video. Paste a link to a single video.';
     }
     return DirectProvider.instance.fromUrl(u);
   }
