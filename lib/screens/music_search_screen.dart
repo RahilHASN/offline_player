@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -12,7 +13,6 @@ import '../music/track.dart';
 import '../services/app_mode.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/track_tile.dart';
-import '../widgets/youtube_badge.dart';
 
 enum _Mode { songs, videos, device }
 
@@ -31,23 +31,62 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
   bool _busy = false;
   String? _err;
 
+  /// Live search: wait this long after the last key press before searching,
+  /// and only search once at least this many letters are typed.
+  /// Every online search uses part of the daily free budget, so keep these
+  /// values on the cautious side.
+  static const Duration _liveDelay = Duration(milliseconds: 700);
+  static const int _minChars = 3;
+
+  Timer? _debounce;
+  int _req = 0; // newest search; older answers are ignored
+
   @override
   void dispose() {
+    _debounce?.cancel();
     _c.dispose();
     super.dispose();
+  }
+
+  /// Called on every key press and when the tab changes.
+  void _live({bool immediate = false}) {
+    _debounce?.cancel();
+    final t = _c.text.trim();
+    if (_mode == _Mode.device || _isLink(t) || !AppMode.instance.online) {
+      _req++;
+      if (_busy) setState(() => _busy = false);
+      return;
+    }
+    if (t.isEmpty) {
+      _req++;
+      setState(() {
+        _busy = false;
+        _err = null;
+        _songs = <MediaItem>[];
+        _videos = <MediaItem>[];
+      });
+      return;
+    }
+    if (t.length < _minChars) {
+      _req++;
+      if (_busy) setState(() => _busy = false);
+      return;
+    }
+    _debounce = Timer(immediate ? Duration.zero : _liveDelay, () => _searchYt(t));
   }
 
   bool _isLink(String q) => q.startsWith('http://') || q.startsWith('https://');
 
   Future<void> _searchYt(String q) async {
     final music = _mode == _Mode.songs;
+    final id = ++_req;
     setState(() {
       _busy = true;
       _err = null;
     });
     try {
       final r = await YouTubeProvider.instance.find(q, music: music);
-      if (!mounted) return;
+      if (!mounted || id != _req) return;
       setState(() {
         if (music) {
           _songs = r;
@@ -56,9 +95,9 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
         }
       });
     } catch (e) {
-      if (mounted) setState(() => _err = '$e');
+      if (mounted && id == _req) setState(() => _err = '$e');
     }
-    if (mounted) setState(() => _busy = false);
+    if (mounted && id == _req) setState(() => _busy = false);
   }
 
   Future<void> _openLink(String q) async {
@@ -79,6 +118,7 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
   }
 
   void _submit(String q) {
+    _debounce?.cancel();
     final t = q.trim();
     if (t.isEmpty) return;
     if (!AppMode.instance.online && (_isLink(t) || _mode != _Mode.device)) {
@@ -173,7 +213,10 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
         title: TextField(
           controller: _c,
           autofocus: true,
-          onChanged: (_) => setState(() {}),
+          onChanged: (_) {
+            setState(() {});
+            _live();
+          },
           onSubmitted: _submit,
           textInputAction: TextInputAction.search,
           decoration: const InputDecoration(
@@ -199,10 +242,13 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                         _Mode.device: 'On device',
                       }[s]!),
                       selected: _mode == s,
-                      onSelected: (_) => setState(() {
-                        _mode = s;
-                        _err = null;
-                      }),
+                      onSelected: (_) {
+                        setState(() {
+                          _mode = s;
+                          _err = null;
+                        });
+                        _live(immediate: true);
+                      },
                     ),
                   ),
               ],
@@ -218,7 +264,7 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                 leading: const Icon(Icons.link),
                 title: const Text('Open this link'),
                 subtitle: const Text(
-                    'YouTube links play in the official player. Other links must be plain audio or video files.',
+                    'Supported links open in their official player. Other links must be plain audio or video files.',
                     style: TextStyle(fontSize: 12)),
                 trailing: _busy ? _spinner() : null,
                 onTap: () => _submit(raw),
@@ -279,8 +325,6 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                 padding: const EdgeInsets.fromLTRB(16, 14, 8, 4),
                 child: Row(
                   children: [
-                    const YouTubeBadge(),
-                    const SizedBox(width: 8),
                     Text(_mode == _Mode.songs ? 'Songs' : 'Videos',
                         style: const TextStyle(
                             fontSize: 15, fontWeight: FontWeight.w800)),
@@ -295,12 +339,15 @@ class _MusicSearchScreenState extends State<MusicSearchScreen> {
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                 child: Text(
                   !online
-                      ? 'Switch to Online mode to search YouTube.'
-                      : list.isEmpty && !_busy
-                          ? 'Type a song or artist and press search on the keyboard. '
-                              'Results play in YouTube\'s official player. '
-                              'Each search uses ${YouTubeQuota.searchCost} of your free daily units.'
-                          : 'Plays in YouTube\'s official player.',
+                      ? 'Switch to Online mode to search online.'
+                      : _busy
+                          ? 'Searching...'
+                          : list.isEmpty
+                              ? (raw.length < _minChars
+                                  ? 'Start typing a song or artist. Results appear as you type. '
+                                      'Each new search uses ${YouTubeQuota.searchCost} of your free daily units.'
+                                  : (_err == null ? 'No results.' : ''))
+                              : 'Results play in the official player.',
                   style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
