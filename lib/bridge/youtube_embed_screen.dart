@@ -3,234 +3,103 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../music/lyrics_service.dart';
 import '../music/track.dart';
 import '../services/native_bridge.dart';
-import 'compliance.dart';
-import 'handoff.dart';
+import 'embed_session.dart';
 import 'playlist_store.dart';
 import 'provider.dart';
-import 'youtube_history.dart';
 
 enum _View { video, poster, lyrics }
 
-/// YouTube's official player (IFrame Player API) inside a WebView, with
-/// song-style controls driven through the official API. The player always
-/// stays visible (at least 200 px high) and nothing is drawn over it.
+/// The full player screen. The official player (see EmbedSession) always
+/// stays visible, at least 200 px high, and nothing is drawn over it.
+/// Going back keeps the song playing in the floating 200 x 200 window.
 class YouTubeEmbedScreen extends StatefulWidget {
-  final List<MediaItem> queue;
-  final int index;
-  const YouTubeEmbedScreen({super.key, required this.queue, required this.index});
+  const YouTubeEmbedScreen({super.key});
 
   @override
   State<YouTubeEmbedScreen> createState() => _YouTubeEmbedScreenState();
 }
 
 class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
-  static const _origin = 'https://com.example.offlineplayer';
-  static const _base = '$_origin/';
+  EmbedSession get _s => EmbedSession.instance;
 
-  late final WebViewController _c;
   final GlobalKey _webKey = GlobalKey();
-  final Random _rng = Random();
-  final List<int> _back = <int>[];
-  final ValueNotifier<double> _pos = ValueNotifier<double>(0);
-  final ValueNotifier<double> _dur = ValueNotifier<double>(0);
   final ScrollController _lyricScroll = ScrollController();
 
-  late int _i = widget.index;
+  // The player itself lives in EmbedSession; these just read from it.
+  WebViewController get _c => _s.controller!;
+  ValueNotifier<double> get _pos => _s.pos;
+  ValueNotifier<double> get _dur => _s.dur;
+  int get _i => _s.index;
+  bool get _playing => _s.playing;
+  bool get _shuffle => _s.shuffle;
+  set _shuffle(bool v) => _s.setShuffle(v);
+  int get _repeat => _s.repeat;
+  set _repeat(int v) => _s.setRepeat(v);
+  MediaItem get _cur => _s.cur;
+
   _View _view = _View.poster;
-  bool _playing = false;
-  bool _shuffle = false;
-  int _repeat = 0; // 0 off, 1 all, 2 one
+  bool _full = false;
   bool _listOpen = false;
   double? _drag;
-  int _errorStreak = 0;
 
   Lyrics? _lyrics;
   bool _lyricsLoading = false;
   String? _lyricsFor;
   int _lastCur = -2;
-
-  MediaItem get _cur => widget.queue[_i];
-
-  static String _html(String id) =>
-      '<!DOCTYPE html><html><head>'
-      '<meta name="viewport" content="width=device-width,initial-scale=1">'
-      '<style>html,body{margin:0;height:100%;background:#000}'
-      '#p{position:absolute;top:0;left:0;width:100%;height:100%}</style>'
-      '</head><body><div id="p"></div>'
-      '<script src="https://www.youtube.com/iframe_api"></script>'
-      '<script>var player;'
-      'function onYouTubeIframeAPIReady(){'
-      'player=new YT.Player("p",{width:"100%",height:"100%",videoId:"$id",'
-      'playerVars:{playsinline:1,rel:0,autoplay:1,origin:"$_origin"},'
-      'events:{onStateChange:function(e){Bridge.postMessage("state:"+e.data);'
-      'if(e.data===0){Bridge.postMessage("ended");}},'
-      'onError:function(e){Bridge.postMessage("error:"+e.data);}}});}'
-      'function loadVideo(v){if(player&&player.loadVideoById){player.loadVideoById(v);}}'
-      'function ctl(a,v){if(!player){return;}'
-      'if(a==="play"){player.playVideo();}'
-      'else if(a==="pause"){player.pauseVideo();}'
-      'else if(a==="seek"){player.seekTo(v,true);}}'
-      'setInterval(function(){if(player&&player.getCurrentTime){'
-      'Bridge.postMessage("pos:"+player.getCurrentTime()+":"+(player.getDuration()||0));}},500);'
-      '</script></body></html>';
+  int _lastIndex = -1;
 
   @override
   void initState() {
     super.initState();
-    final id = _cur.videoId!;
-    try {
-      Compliance.assertHandoff(EmbedHandoff(providerId: 'youtube', videoId: id));
-    } on ComplianceError {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.of(context).pop();
-      });
-    }
-    YouTubeHistory.instance.add(_cur);
+    _lastIndex = _s.index;
+    _s.addListener(_onSession);
+    _s.onNotice = _notice;
     PlaylistStore.instance.load();
-    _c = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Colors.black)
-      ..addJavaScriptChannel('Bridge', onMessageReceived: (m) => _onMsg(m.message))
-      ..setNavigationDelegate(NavigationDelegate(
-        onNavigationRequest: (r) {
-          if (!r.isMainFrame) return NavigationDecision.navigate;
-          final u = r.url;
-          if (u.startsWith('about:') || u.startsWith('data:') || u == _base) {
-            return NavigationDecision.navigate;
-          }
-          final uri = Uri.tryParse(u);
-          if (uri != null && uri.scheme == 'https') {
-            launchUrl(uri, mode: LaunchMode.externalApplication);
-          }
-          return NavigationDecision.prevent;
-        },
-      ));
-    final plat = _c.platform;
-    if (plat is AndroidWebViewController) {
-      plat.setMediaPlaybackRequiresUserGesture(false);
-    }
-    _c.loadHtmlString(_html(id), baseUrl: _base);
   }
 
   @override
   void dispose() {
-    NativeBridge.setAutoPip(false);
-    try {
-      _c.loadRequest(Uri.parse('about:blank'));
-    } catch (_) {}
-    _pos.dispose();
-    _dur.dispose();
+    _s.removeListener(_onSession);
+    _s.onNotice = null;
     _lyricScroll.dispose();
     super.dispose();
   }
 
-  // ---------- messages from the player ----------
-
-  void _onMsg(String m) {
+  void _notice(String m) {
     if (!mounted) return;
-    if (m.startsWith('pos:')) {
-      final p = m.split(':');
-      if (p.length >= 3) {
-        final c = double.tryParse(p[1]);
-        final d = double.tryParse(p[2]);
-        if (c != null) _pos.value = c;
-        if (d != null && d > 0) _dur.value = d;
-      }
-    } else if (m.startsWith('state:')) {
-      final s = int.tryParse(m.substring(6));
-      final pl = s == 1;
-      if (pl) _errorStreak = 0;
-      if (pl != _playing) {
-        setState(() => _playing = pl);
-        NativeBridge.setAutoPip(pl);
-      }
-    } else if (m == 'ended') {
-      _onEnded();
-    } else if (m.startsWith('error')) {
-      _errorStreak++;
-      if (_errorStreak > 3) return;
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(
-            content: Text("This one can't play here. Skipping.")));
-      _next(auto: true);
-    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(m)));
   }
 
-  void _onEnded() {
-    if (_repeat == 2) {
-      _c.runJavaScript('ctl("seek",0);ctl("play")');
+  void _onSession() {
+    if (!mounted) return;
+    if (!_s.active) {
+      Navigator.of(context).maybePop();
       return;
     }
-    _next(auto: true);
-  }
-
-  // ---------- transport ----------
-
-  void _toggle() => _c.runJavaScript(_playing ? 'ctl("pause")' : 'ctl("play")');
-
-  void _seek(double s) => _c.runJavaScript('ctl("seek",$s)');
-
-  void _next({bool auto = false}) {
-    final n = widget.queue.length;
-    if (n == 0) return;
-    int t;
-    if (_shuffle && n > 1) {
-      do {
-        t = _rng.nextInt(n);
-      } while (t == _i);
-    } else {
-      t = _i + 1;
-      if (t >= n) {
-        if (_repeat == 1 || !auto) {
-          t = 0;
-        } else {
-          return;
-        }
-      }
-    }
-    _go(t);
-  }
-
-  void _prev() {
-    if (_pos.value > 3) {
-      _seek(0);
-      return;
-    }
-    if (_back.isNotEmpty) {
-      _go(_back.removeLast(), push: false);
-      return;
-    }
-    if (_i > 0) _go(_i - 1, push: false);
-  }
-
-  void _go(int i, {bool push = true}) {
-    if (i < 0 || i >= widget.queue.length) return;
-    final id = widget.queue[i].videoId;
-    if (id == null || !Compliance.validVideoId(id)) return;
-    try {
-      Compliance.assertHandoff(EmbedHandoff(providerId: 'youtube', videoId: id));
-    } on ComplianceError {
-      return;
-    }
-    if (push) _back.add(_i);
-    setState(() {
-      _i = i;
+    if (_s.index != _lastIndex) {
+      _lastIndex = _s.index;
       _lyrics = null;
       _lyricsFor = null;
+      _lyricsLoading = false;
       _lastCur = -2;
-    });
-    _pos.value = 0;
-    _dur.value = widget.queue[i].durationSec.toDouble();
-    YouTubeHistory.instance.add(widget.queue[i]);
-    _c.runJavaScript("loadVideo('$id')");
-    if (_view == _View.lyrics) _ensureLyrics();
+      if (_view == _View.lyrics) _ensureLyrics();
+    }
+    setState(() {});
   }
+
+  // ---------- transport (the session does the work) ----------
+
+  void _toggle() => _s.toggle();
+  void _seek(double x) => _s.seek(x);
+  void _next({bool auto = false}) => _s.next(auto: auto);
+  void _prev() => _s.prev();
+  void _go(int i) => _s.go(i);
 
   // ---------- lyrics ----------
 
@@ -289,6 +158,10 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
     return AppBar(
       toolbarHeight: 46,
       actions: [
+        IconButton(
+          icon: const Icon(Icons.fullscreen),
+          onPressed: () => setState(() => _full = true),
+        ),
         ToggleButtons(
           isSelected: [
             _view == _View.video,
@@ -311,10 +184,12 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
           onSelected: (v) {
             if (v == 'pip') NativeBridge.enterPip();
             if (v == 'yt') launchUrl(watch, mode: LaunchMode.externalApplication);
+            if (v == 'close') _s.stop();
           },
           itemBuilder: (context) => const [
             PopupMenuItem(value: 'pip', child: Text('Floating window (keeps playing)')),
             PopupMenuItem(value: 'yt', child: Text('Open in browser or app')),
+            PopupMenuItem(value: 'close', child: Text('Close player')),
           ],
         ),
       ],
@@ -553,10 +428,10 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
     );
   }
 
-  List<int> _upIdx() => <int>[for (var k = _i + 1; k < widget.queue.length; k++) k];
+  List<int> _upIdx() => <int>[for (var k = _i + 1; k < _s.queue.length; k++) k];
 
   Widget _tile(int k) {
-    final m = widget.queue[k];
+    final m = _s.queue[k];
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16),
       onTap: () => _go(k),
@@ -591,7 +466,7 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
   }
 
   Widget _card(int k) {
-    final m = widget.queue[k];
+    final m = _s.queue[k];
     return InkWell(
       onTap: () => _go(k),
       borderRadius: BorderRadius.circular(10),
@@ -706,24 +581,49 @@ class _YouTubeEmbedScreenState extends State<YouTubeEmbedScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, c) {
-        final land = c.maxWidth > c.maxHeight;
-        final web = WebViewWidget(key: _webKey, controller: _c);
-        // YouTube requires the player to be at least 200 x 200 px.
-        final playerH = max(200.0, c.maxWidth * 9 / 16);
-        return Scaffold(
-          appBar: land ? null : _appBar(),
-          body: land
-              ? ColoredBox(color: Colors.black, child: web)
-              : Column(
-                  children: [
-                    SizedBox(height: playerH, child: web),
-                    Expanded(child: _below()),
-                  ],
-                ),
-        );
+    if (!_s.active) return const Scaffold(body: SizedBox.shrink());
+    return PopScope(
+      canPop: !_full,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) setState(() => _full = false);
       },
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final land = c.maxWidth > c.maxHeight;
+          final web = WebViewWidget(key: _webKey, controller: _c);
+          // YouTube requires the player to be at least 200 x 200 px.
+          final playerH = max(200.0, c.maxWidth * 9 / 16);
+          if (_full) {
+            return Scaffold(
+              appBar: AppBar(
+                toolbarHeight: 44,
+                title: Text(_cur.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 14)),
+                actions: [
+                  IconButton(
+                    icon: const Icon(Icons.fullscreen_exit),
+                    onPressed: () => setState(() => _full = false),
+                  ),
+                ],
+              ),
+              body: ColoredBox(color: Colors.black, child: web),
+            );
+          }
+          return Scaffold(
+            appBar: land ? null : _appBar(),
+            body: land
+                ? ColoredBox(color: Colors.black, child: web)
+                : Column(
+                    children: [
+                      SizedBox(height: playerH, child: web),
+                      Expanded(child: _below()),
+                    ],
+                  ),
+          );
+        },
+      ),
     );
   }
 }
