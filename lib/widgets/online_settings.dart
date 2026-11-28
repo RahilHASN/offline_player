@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../bridge/providers/youtube_provider.dart';
 import '../bridge/registry.dart';
 import '../services/app_mode.dart';
-import 'youtube_badge.dart';
 
 /// Online / Offline pill. Tap to switch (online build only).
 class ModeChip extends StatelessWidget {
@@ -24,7 +23,7 @@ class ModeChip extends StatelessWidget {
                 ..hideCurrentSnackBar()
                 ..showSnackBar(const SnackBar(
                   content: Text(
-                      'This is the offline-only build. Install the online build to use YouTube.'),
+                      'This is the offline-only build. Install the online build to search online.'),
                 ));
               return;
             }
@@ -53,14 +52,8 @@ void showOnlineSettings(BuildContext context) {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: const [
-                  Text('Online settings',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-                  Spacer(),
-                  YouTubeBadge(),
-                ],
-              ),
+              const Text('Online settings',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Online mode'),
@@ -75,7 +68,7 @@ void showOnlineSettings(BuildContext context) {
                 controller: yt,
                 obscureText: true,
                 decoration: const InputDecoration(
-                  labelText: 'YouTube Data API key',
+                  labelText: 'Search API key',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
