@@ -72,7 +72,7 @@ class Net {
       UrlGuard.parse(u.toString());
       await UrlGuard.assertPublic(u);
       if (Compliance.isYoutubeHost(u.host)) {
-        throw 'YouTube media addresses cannot be played this way.';
+        throw 'That media address cannot be played this way.';
       }
       final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
       try {
