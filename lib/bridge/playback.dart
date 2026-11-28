@@ -4,12 +4,12 @@ import 'package:url_launcher/url_launcher.dart';
 import '../music/music_player.dart';
 import '../music/track.dart';
 import 'compliance.dart';
+import 'embed_session.dart';
 import 'handoff.dart';
 import 'native_video_screen.dart';
 import 'provider.dart';
 import 'registry.dart';
 import 'router.dart';
-import 'youtube_embed_screen.dart';
 import 'youtube_history.dart';
 
 /// One entry point: ask the router, then hand off to the right engine.
@@ -45,6 +45,7 @@ class Playback {
 
     switch (h) {
       case NativeHandoff n:
+        EmbedSession.instance.stop();
         if (n.isVideo) {
           MusicPlayer.instance.pause();
           await Navigator.of(context).push(MaterialPageRoute<void>(
@@ -65,7 +66,6 @@ class Playback {
           await MusicPlayer.instance.playQueue(tracks, i);
         }
       case EmbedHandoff _:
-        MusicPlayer.instance.pause();
         final src = queue.isEmpty ? <MediaItem>[item] : queue;
         final q = <MediaItem>[
           for (final m in src)
@@ -76,9 +76,11 @@ class Playback {
           q.insert(0, item);
           i = 0;
         }
-        await Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => YouTubeEmbedScreen(queue: q, index: i),
-        ));
+        if (EmbedSession.instance.start(q, i)) {
+          await EmbedSession.instance.openFull();
+        } else if (context.mounted) {
+          _msg(context, "This one can't play here.");
+        }
       case ExternalLinkHandoff x:
         MusicPlayer.instance.pause();
         YouTubeHistory.instance.add(item);
