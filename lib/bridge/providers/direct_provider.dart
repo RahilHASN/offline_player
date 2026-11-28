@@ -28,7 +28,7 @@ class DirectProvider implements MediaProvider {
 
   Future<MediaItem> fromUrl(Uri u) async {
     if (Compliance.isYoutubeHost(u.host)) {
-      throw 'YouTube links are played through the official player only.';
+      throw 'That link can only be played through its official player.';
     }
     final p = await Net.probe(u);
     final mime = p.mime.toLowerCase();
